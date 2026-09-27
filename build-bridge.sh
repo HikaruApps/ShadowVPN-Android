@@ -10,6 +10,6 @@ cp go/bridge/*.go "$out/bridge/"
 (
   cd "$out"
   go get golang.org/x/mobile/bind@latest
-  gomobile bind -target=android/arm64 -javapkg=net.shadownet.shadowvpn.core \
-    -o "$repo_root/app/libs/shadowvpn-core.aar" ./bridge
+  gomobile bind -target=android/arm64 -androidapi=29 -javapkg=net.shadownet.shadowvpn.core \
+  -o "$repo_root/app/libs/shadowvpn-core.aar" ./bridge
 )
