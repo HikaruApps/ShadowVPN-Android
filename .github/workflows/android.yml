@@ -20,7 +20,7 @@ jobs:
         with:
           go-version-file: go/go.mod
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - uses: gradle/actions/setup-gradle@v4
