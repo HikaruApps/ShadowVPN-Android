@@ -25,8 +25,8 @@ type endpointBootstrap struct {
 // semantics. This prevents the bootstrap loop where resolving the proxy itself
 // requires an already working proxy connection.
 func resolveProfileEndpoint(ctx context.Context, profile Profile) (Profile, endpointBootstrap, error) {
-	host := strings.TrimSpace(profile.Address)
-	if host == "" || profile.Port < 1 || profile.Port > 65535 {
+	host := strings.TrimSpace(profile.address)
+	if host == "" || profile.port < 1 || profile.port > 65535 {
 		return Profile{}, endpointBootstrap{}, errors.New("профиль не содержит корректный адрес сервера")
 	}
 
@@ -82,7 +82,7 @@ func uniqueEndpointIPs(addresses []net.IPAddr) []string {
 }
 
 func profileWithEndpoint(profile Profile, address, originalHost string) (Profile, error) {
-	encoded, err := json.Marshal(profile.Outbound)
+	encoded, err := json.Marshal(profile.outbound)
 	if err != nil {
 		return Profile{}, fmt.Errorf("не удалось скопировать конфигурацию сервера: %w", err)
 	}
@@ -96,8 +96,8 @@ func profileWithEndpoint(profile Profile, address, originalHost string) (Profile
 	if originalHost != "" {
 		preserveTransportHostname(outbound, originalHost)
 	}
-	profile.Address = address
-	profile.Outbound = outbound
+	profile.address = address
+	profile.outbound = outbound
 	return profile, nil
 }
 

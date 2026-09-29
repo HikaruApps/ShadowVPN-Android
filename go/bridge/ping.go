@@ -125,7 +125,7 @@ func httpPingProfileWithOptions(ctx context.Context, profile Profile, method str
 		return 0, "", err
 	}
 	if options.AllowEndpoint != nil {
-		if err = options.AllowEndpoint(proxyEndpoint{Address: resolved.Address, Port: resolved.Port}); err != nil {
+		if err = options.AllowEndpoint(proxyEndpoint{Address: resolved.address, Port: resolved.port}); err != nil {
 			return 0, "", err
 		}
 	}
@@ -252,10 +252,10 @@ func pingProfilesWithMethodOptions(parent context.Context, profiles []Profile, m
 						var resolved Profile
 						resolved, _, err = resolveProfileEndpoint(ctx, profile)
 						if err == nil {
-							latency, resolvedAddress, err = tcpPingEndpointWithOptions(ctx, resolved.Address, resolved.Port, options)
+							latency, resolvedAddress, err = tcpPingEndpointWithOptions(ctx, resolved.address, resolved.port, options)
 						}
 					} else {
-						latency, resolvedAddress, err = tcpPingEndpointWithOptions(ctx, profile.Address, profile.Port, options)
+						latency, resolvedAddress, err = tcpPingEndpointWithOptions(ctx, profile.address, profile.port, options)
 					}
 				}
 				results[index] = PingResult{ID: profile.ID, LatencyMS: latency, Available: err == nil, ResolvedAddress: resolvedAddress}

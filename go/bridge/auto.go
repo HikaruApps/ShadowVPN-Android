@@ -21,21 +21,23 @@ type proxyEndpoint struct {
 
 func autoProfile() Profile {
 	return Profile{
-		ID:        autoProfileID,
-		Name:      "Авто",
-		Protocol:  "auto",
-		Transport: "tcp",
-		Auto:      true,
+		ID:          autoProfileID,
+		Name:        "Авто",
+		Protocol:    "auto",
+		Transport:   "tcp",
+		Auto:        true,
+		SourceIndex: -1,
 	}
 }
 
 func autoNoRUProfile() Profile {
 	return Profile{
-		ID:        autoNoRUProfileID,
-		Name:      "Авто без РФ",
-		Protocol:  "auto",
-		Transport: "tcp",
-		Auto:      true,
+		ID:          autoNoRUProfileID,
+		Name:        "Авто без РФ",
+		Protocol:    "auto",
+		Transport:   "tcp",
+		Auto:        true,
+		SourceIndex: -1,
 	}
 }
 
@@ -148,7 +150,7 @@ func prepareAutoProfiles(ctx context.Context, profiles []Profile, results []Ping
 		var resolved Profile
 		var err error
 		if net.ParseIP(resolvedAddress) != nil {
-			originalHost := strings.TrimSpace(profile.Address)
+			originalHost := strings.TrimSpace(profile.address)
 			if net.ParseIP(originalHost) != nil {
 				originalHost = ""
 			}
@@ -164,7 +166,7 @@ func prepareAutoProfiles(ctx context.Context, profiles []Profile, results []Ping
 			continue
 		}
 		prepared = append(prepared, resolved)
-		endpoint := proxyEndpoint{Address: resolved.Address, Port: resolved.Port}
+		endpoint := proxyEndpoint{Address: resolved.address, Port: resolved.port}
 		if _, exists := seenEndpoints[endpoint]; !exists {
 			seenEndpoints[endpoint] = struct{}{}
 			endpoints = append(endpoints, endpoint)

@@ -1,14 +1,14 @@
 plugins { id 'com.android.application' }
 
 android {
-    namespace 'net.shadownet.shadowvpn.android'
-    compileSdk 35
+    namespace = 'net.shadownet.shadowvpn.android'
+    compileSdk = 35
     defaultConfig {
-        applicationId 'net.shadownet.shadowvpn.android'
-        minSdk 29
-        targetSdk 35
-        versionCode 1
-        versionName '0.1.0'
+        applicationId = 'net.shadownet.shadowvpn.android'
+        minSdk = 29
+        targetSdk = 35
+        versionCode = 17
+        versionName = '0.15.2'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

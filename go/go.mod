@@ -1,5 +1,7 @@
 module shadowvpn/android
 
+replace github.com/refraction-networking/utls => ./third_party/utls
+
 go 1.27
 
 require (
