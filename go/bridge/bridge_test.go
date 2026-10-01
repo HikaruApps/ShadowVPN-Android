@@ -148,3 +148,48 @@ func TestPingProfilesWithoutImportReturnsEmptyJSON(t *testing.T) {
 		t.Fatalf("unexpected empty ping result: %q, %v", result, err)
 	}
 }
+
+func TestParseNaiveHTTPSURI(t *testing.T) {
+	profile, err := parseURI("naive+https://user:p%40ss@proxy.example:8443?insecure-concurrency=2#Naive%20H2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Protocol != "naive" || profile.Transport != "h2" || profile.Name != "Naive H2" {
+		t.Fatalf("unexpected profile metadata: %#v", profile)
+	}
+	if profile.address != "proxy.example" || profile.port != 8443 {
+		t.Fatalf("unexpected endpoint: %s:%d", profile.address, profile.port)
+	}
+	settings := profile.outbound["settings"].(map[string]any)
+	if settings["username"] != "user" || settings["password"] != "p@ss" || settings["insecureConcurrency"] != 2 {
+		t.Fatalf("unexpected Naive settings: %#v", settings)
+	}
+}
+
+func TestParseNaiveQUICURIUsesHTTPSDefaultPort(t *testing.T) {
+	profile, err := parseURI("naive+quic://user:pass@proxy.example?congestion-control=bbr2#Naive%20H3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Transport != "quic" || profile.port != 443 {
+		t.Fatalf("unexpected QUIC profile: %#v", profile)
+	}
+	settings := profile.outbound["settings"].(map[string]any)
+	if settings["quic"] != true || settings["congestionControl"] != "bbr2" {
+		t.Fatalf("unexpected QUIC settings: %#v", settings)
+	}
+}
+
+func TestNaiveProfileUsesNativeOutboundPlaceholder(t *testing.T) {
+	profile, err := parseURI("naive+https://user:pass@127.0.0.1:443#Naive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbound, err := configuredOutbound(profile, "proxy", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outbound["protocol"] != "freedom" || outbound["tag"] != "proxy" {
+		t.Fatalf("unexpected native outbound placeholder: %#v", outbound)
+	}
+}

@@ -52,6 +52,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -60,10 +61,14 @@ public final class MainActivity extends Activity {
     private static final String UI_URL = "file:///android_asset/shadowvpn/index.html";
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService appWorker = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final List<ServerItem> servers = new ArrayList<>();
     private final List<SubscriptionInfo> subscriptionInfo = new ArrayList<>();
     private final Map<String, PingData> pingResults = new HashMap<>();
+    private final Map<String, String> appIconCache = new ConcurrentHashMap<>();
+    private final Set<String> pendingAppIcons = ConcurrentHashMap.newKeySet();
+    private volatile String installedAppsCache = "";
 
     private SharedPreferences preferences;
     private WebView webView;
@@ -111,6 +116,7 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(Color.BLACK);
         getWindow().setNavigationBarColor(Color.BLACK);
         setupWebView();
+        appWorker.execute(() -> installedAppsCache = installedAppsJson().toString());
     }
 
     private void setupWebView() {
@@ -162,10 +168,13 @@ public final class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         ui.removeCallbacks(statusUpdater);
+        webReady = false;
         worker.shutdownNow();
+        appWorker.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("ShadowVpnAndroid");
             webView.destroy();
+            webView = null;
         }
         super.onDestroy();
     }
@@ -545,6 +554,8 @@ public final class MainActivity extends Activity {
             root.put("selected", selected == null ? JSONObject.NULL : serverJson(selected));
             root.put("subscriptions", subscriptionSlotsJson());
             root.put("settings", settingsJson());
+            root.put("appVersion", getPackageManager()
+                    .getPackageInfo(getPackageName(), 0).versionName);
         } catch (Exception ignored) { }
         return root;
     }
@@ -756,7 +767,51 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public String getInstalledApps() {
-            return installedAppsJson().toString();
+            String cached = installedAppsCache;
+            return cached.isEmpty() ? "{\"apps\":[],\"loading\":true}" : cached;
+        }
+
+        @JavascriptInterface public void requestInstalledApps() {
+            appWorker.execute(() -> {
+                String payload = installedAppsCache;
+                if (payload.isEmpty()) {
+                    payload = installedAppsJson().toString();
+                    installedAppsCache = payload;
+                }
+                final String result = payload;
+                ui.post(() -> {
+                    if (!webReady || webView == null) return;
+                    webView.evaluateJavascript(
+                            "window.ShadowVPN&&window.ShadowVPN.installedApps(" + JSONObject.quote(result) + ")",
+                            null);
+                });
+            });
+        }
+
+        @JavascriptInterface public void requestAppIcon(String packageName) {
+            if (packageName == null
+                    || !packageName.matches("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
+                    || !pendingAppIcons.add(packageName)) return;
+            appWorker.execute(() -> {
+                String source = appIconCache.get(packageName);
+                if (source == null) {
+                    try {
+                        ApplicationInfo application = getPackageManager().getApplicationInfo(packageName, 0);
+                        source = drawableDataUrl(application.loadIcon(getPackageManager()));
+                    } catch (Exception ignored) {
+                        source = "";
+                    }
+                    appIconCache.put(packageName, source);
+                }
+                pendingAppIcons.remove(packageName);
+                final String icon = source;
+                ui.post(() -> {
+                    if (!webReady || webView == null) return;
+                    webView.evaluateJavascript(
+                            "window.ShadowVPN&&window.ShadowVPN.appIcon(" + JSONObject.quote(packageName)
+                                    + "," + JSONObject.quote(icon) + ")", null);
+                });
+            });
         }
 
         @SuppressLint("BatteryLife")
@@ -789,10 +844,13 @@ public final class MainActivity extends Activity {
                     unique.put(application.packageName, application);
                 }
             }
-            List<ApplicationInfo> sorted = new ArrayList<>(unique.values());
+            List<JSONObject> sorted = new ArrayList<>();
+            for (ApplicationInfo application : unique.values()) {
+                sorted.add(applicationJson(application));
+            }
             sorted.sort(Comparator.comparing(
-                    app -> app.loadLabel(getPackageManager()).toString().toLowerCase(Locale.ROOT)));
-            for (ApplicationInfo application : sorted) apps.put(applicationJson(application));
+                    app -> app.optString("name", "").toLowerCase(Locale.ROOT)));
+            for (JSONObject application : sorted) apps.put(application);
             root.put("apps", apps);
         } catch (Exception error) {
             try { root.put("error", cleanError(error)); } catch (Exception ignored) { }
@@ -804,13 +862,12 @@ public final class MainActivity extends Activity {
         JSONObject item = new JSONObject();
         item.put("packageName", application.packageName);
         item.put("name", application.loadLabel(getPackageManager()).toString());
-        item.put("icon", drawableDataUrl(application.loadIcon(getPackageManager())));
         return item;
     }
 
     private String drawableDataUrl(Drawable drawable) {
         try {
-            int size = 96;
+            int size = 72;
             Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
             Canvas canvas = new Canvas(bitmap);
             drawable.setBounds(0, 0, size, size);

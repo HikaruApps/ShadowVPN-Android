@@ -6,7 +6,7 @@
   const native = window.ShadowVpnAndroid || {
     ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {},
     saveSubscriptions() {}, saveSettings() {}, getLogs() { return ""; }, copyText() {}, openVpnSettings() {},
-    getInstalledApps() { return '{"apps":[]}'; }, openBatterySettings() {}
+    getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}
   };
 
   const app = $("app");
@@ -25,6 +25,8 @@
   let sheetOpen = false;
   let panelBackAction = null;
   let panelCloseTimer = 0;
+  let splitAppsReceiver = null;
+  let appIconObserver = null;
 
   function svgFlag(server, large = false) {
     const slot = document.createElement("span");
@@ -168,7 +170,9 @@
     $("ipLabel").textContent = connected ? "Защищённый IP" : connecting ? "Шифруем IP" : "Ваш IP";
     $("ipValue").textContent = snapshot.publicIp || (connecting ? "•••.•••.•••.•••" : "Определяем…");
     $("sessionTime").textContent = snapshot.session || "00:00:00";
+    $("connectionDetails").classList.toggle("has-session", connected);
     $("connectionDuration").hidden = !connected;
+    $("detailsDivider").hidden = !connected;
     $("trafficStats").hidden = !connected;
     $("downloadSpeed").textContent = snapshot.traffic?.downloadSpeed || "0 Б/с";
     $("downloadTotal").textContent = snapshot.traffic?.downloadTotal || "0 Б";
@@ -218,6 +222,22 @@
     toastTimer = setTimeout(() => { toast.hidden = true; }, 2600);
   }
 
+  function updateSortMenu() {
+    $("sortMenu").querySelectorAll("button[data-sort]").forEach(button => {
+      const active = button.dataset.sort === sortMode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-checked", String(active));
+    });
+  }
+
+  function toggleSortMenu(force) {
+    const menu = $("sortMenu");
+    const open = typeof force === "boolean" ? force : menu.hidden;
+    if (open) updateSortMenu();
+    menu.hidden = !open;
+    $("sortButton").setAttribute("aria-expanded", String(open));
+  }
+
   function openServers() {
     if (sheetOpen) return;
     sheetOpen = true;
@@ -228,6 +248,7 @@
 
   function closeServers() {
     if (!sheetOpen) return false;
+    toggleSortMenu(false);
     sheetOpen = false;
     serverSheet.classList.remove("dragging", "open");
     serverSheet.style.removeProperty("--drag-y");
@@ -330,6 +351,8 @@
   function closePanel() {
     if (panelOverlay.hidden) return false;
     panelBackAction = null;
+    splitAppsReceiver = null;
+    if (appIconObserver) { appIconObserver.disconnect(); appIconObserver = null; }
     panel.classList.remove("dragging");
     panel.classList.add("closing");
     panel.style.removeProperty("--panel-drag-y");
@@ -364,6 +387,7 @@
     };
     const begin = event => {
       if (panelOverlay.hidden || panel.classList.contains("closing")) return;
+      if (event.target.closest("button,input,select,textarea,label")) return;
       startY = event.clientY;
       startAt = performance.now();
       dragging = true;
@@ -414,12 +438,18 @@
   }
 
   function title(name, subtitle, backAction = null, settingsIndex = false) {
+    splitAppsReceiver = null;
+    if (appIconObserver) { appIconObserver.disconnect(); appIconObserver = null; }
     $("panelTitle").textContent = name;
     $("panelSubtitle").textContent = subtitle;
     $("panel").classList.toggle("settings-index", settingsIndex);
     const back = $("panelBack");
     back.hidden = !backAction;
-    back.onclick = backAction;
+    back.onclick = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (backAction) backAction();
+    };
     panelBackAction = backAction;
   }
   function section(text) { const node = document.createElement("div"); node.className = "section-label"; node.textContent = text; return node; }
@@ -450,7 +480,7 @@
       settingsCategory("split", "Раздельное туннелирование", "Выбор приложений для VPN", buildSplitTunneling),
       settingsCategory("application", "Приложение", "Устройство и обновление подписки", buildApplicationSettings),
       settingsCategory("logs", "Диагностика", "Логи Xray и Android TUN", () => buildLogs(true)),
-      settingsCategory("about", "О ShadowVPN", "Версия 0.15.2 · patched uTLS", buildAbout)
+      settingsCategory("about", "О ShadowVPN", `Версия ${snapshot.appVersion || "0.16.0"} · техническая информация`, buildAbout)
     );
     body.append(home);
   }
@@ -517,7 +547,7 @@
     body.append(settingRow("DNS внутри VPN", s.doh || "Системный DNS", dns));
     const fragmentation = switchControl(!!s.fragmentation);
     body.append(settingRow("Фрагментация TLS", "Делит ClientHello для обхода DPI", fragmentation));
-    const mtu = selectControl([["1280","1280 · максимум совместимости"],["1360","1360"],["1400","1400 · рекомендуется"],["1500","1500 · локальные сети"]], s.tunMtu || "1400");
+    const mtu = selectControl([["1280","1280 · совместимо"],["1360","1360 · мобильные сети"],["1400","1400 · оптимально"],["1500","1500 · локальная сеть"]], s.tunMtu || "1400");
     body.append(settingRow("MTU туннеля", "1400 уменьшает фрагментацию в мобильных сетях", mtu));
     const ipv6 = switchControl(!!s.ipv6Enabled);
     body.append(settingRow("IPv6 внутри VPN", "Включайте только при стабильной поддержке сервером", ipv6));
@@ -536,9 +566,16 @@
 
   function appIcon(app) {
     const icon = document.createElement("span"); icon.className = "installed-app-icon";
-    if (app.icon) { const image = document.createElement("img"); image.src = app.icon; image.alt = ""; icon.append(image); }
-    else icon.textContent = (app.name || "?").slice(0, 1).toUpperCase();
+    icon.textContent = (app.name || "?").slice(0, 1).toUpperCase();
+    icon.dataset.package = app.packageName;
+    if (app.icon) setAppIcon(icon, app.icon);
     return icon;
+  }
+
+  function setAppIcon(slot, source) {
+    if (!slot || !source || slot.querySelector("img")) return;
+    const image = document.createElement("img"); image.src = source; image.alt = "";
+    slot.textContent = ""; slot.append(image);
   }
 
   function buildSplitTunneling() {
@@ -546,7 +583,7 @@
     const body = $("panelBody"); body.replaceChildren(); body.scrollTop = 0;
     const s = snapshot.settings || {};
     let data = { apps: [] };
-    try { data = JSON.parse(native.getInstalledApps() || '{"apps":[]}'); } catch (_) {}
+    let renderVersion = 0;
     const selected = new Set(s.appRoutingPackages || []);
     body.append(section("РЕЖИМ"));
     const modes = document.createElement("div"); modes.className = "routing-choices";
@@ -562,26 +599,66 @@
     });
     body.append(modes, section("ПРИЛОЖЕНИЯ"));
     const search = document.createElement("input"); search.className = "field app-search"; search.placeholder = "Поиск приложения"; body.append(search);
-    const list = document.createElement("div"); list.className = "installed-app-list"; body.append(list);
+    const list = document.createElement("div"); list.className = "installed-app-list loading";
+    list.innerHTML = '<div class="apps-loading"><i></i><span>Загружаем приложения…</span></div>';
+    body.append(list);
+    appIconObserver = "IntersectionObserver" in window ? new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const slot = entry.target;
+        appIconObserver.unobserve(slot);
+        if (!slot.dataset.loading && !slot.querySelector("img")) {
+          slot.dataset.loading = "1";
+          native.requestAppIcon?.(slot.dataset.package || "");
+        }
+      });
+    }, { root: body, rootMargin: "160px 0px" }) : null;
     const draw = () => {
-      const query = search.value.trim().toLowerCase(); list.replaceChildren();
-      data.apps.filter(app => !query || app.name.toLowerCase().includes(query) || app.packageName.toLowerCase().includes(query)).forEach(app => {
+      const version = ++renderVersion;
+      const query = search.value.trim().toLocaleLowerCase("ru");
+      const filtered = data.apps.filter(app => !query || app.name.toLocaleLowerCase("ru").includes(query) || app.packageName.toLowerCase().includes(query));
+      if (appIconObserver) appIconObserver.disconnect();
+      list.classList.remove("loading"); list.replaceChildren();
+      if (!filtered.length) {
+        const empty = document.createElement("div"); empty.className = "empty-list"; empty.textContent = data.error || "Приложения не найдены"; list.append(empty); return;
+      }
+      let index = 0;
+      const appendBatch = () => {
+        if (version !== renderVersion || splitAppsReceiver == null) return;
+        const fragment = document.createDocumentFragment();
+        filtered.slice(index, index + 24).forEach(app => {
         const label = document.createElement("label"); label.className = "installed-app";
         const check = document.createElement("input"); check.type = "checkbox"; check.checked = selected.has(app.packageName);
         check.addEventListener("change", () => check.checked ? selected.add(app.packageName) : selected.delete(app.packageName));
         const copy = document.createElement("span"); copy.className = "installed-app-copy";
         const name = document.createElement("b"); name.textContent = app.name;
         const pkg = document.createElement("small"); pkg.textContent = app.packageName; copy.append(name, pkg);
-        label.append(appIcon(app), copy, check); list.append(label);
-      });
-      if (!list.childElementCount) { const empty = document.createElement("div"); empty.className = "empty-list"; empty.textContent = data.error || "Приложения не найдены"; list.append(empty); }
+          const icon = appIcon(app); label.append(icon, copy, check); fragment.append(label);
+          if (appIconObserver) appIconObserver.observe(icon);
+          else native.requestAppIcon?.(app.packageName);
+        });
+        list.append(fragment); index += 24;
+        if (index < filtered.length) requestAnimationFrame(appendBatch);
+      };
+      appendBatch();
     };
-    search.addEventListener("input", draw); draw();
+    let searchFrame = 0;
+    search.addEventListener("input", () => { cancelAnimationFrame(searchFrame); searchFrame = requestAnimationFrame(draw); });
+    splitAppsReceiver = payload => {
+      try { data = typeof payload === "string" ? JSON.parse(payload) : payload; }
+      catch (_) { data = { apps: [], error: "Не удалось прочитать список приложений" }; }
+      draw();
+    };
+    if (hasNativeBridge && typeof native.requestInstalledApps === "function") native.requestInstalledApps();
+    else {
+      try { splitAppsReceiver(native.getInstalledApps() || '{"apps":[]}'); }
+      catch (_) { splitAppsReceiver({ apps: [] }); }
+    }
     saveButton(body, () => ({ appRoutingMode:modes.querySelector("input:checked")?.value || "all", appRoutingPackages:[...selected] }));
   }
 
   function buildApplicationSettings() {
-    title("Приложение", "Устройство и фоновые обновления", buildSettings);
+    title("Приложение", "Фоновая работа и обновления", buildSettings);
     const body = $("panelBody"); body.replaceChildren(); body.scrollTop = 0;
     const s = snapshot.settings || {};
     body.append(section("ФОНОВАЯ РАБОТА"));
@@ -589,26 +666,31 @@
     battery.textContent = s.batteryUnrestricted ? "Без ограничений" : "Настроить";
     battery.addEventListener("click", () => native.openBatterySettings());
     body.append(settingRow("Использование батареи", s.batteryUnrestricted ? "Android не ограничивает VPN в фоне" : "Разрешите работу без ограничений для стабильного VPN", battery));
-    body.append(section("УСТРОЙСТВО"));
-    const copyHwid = document.createElement("button"); copyHwid.className = "secondary"; copyHwid.textContent = "Копировать";
-    copyHwid.addEventListener("click", () => native.copyText(s.hwid || ""));
-    body.append(settingRow("HWID устройства", s.hwid || "Недоступно", copyHwid));
     body.append(section("ПОДПИСКА"));
     const autoUpdate = selectControl([["15","15 минут"],["60","1 час"],["360","6 часов"],["1440","Раз в сутки"],["off","Выключено"]], s.autoUpdate);
     body.append(settingRow("Обновление подписки", "Не прерывает активный VPN", autoUpdate));
-    const fingerprint = document.createElement("span"); fingerprint.className = "setting-value"; fingerprint.textContent = "Chrome 152";
-    body.append(settingRow("TLS fingerprint", "Актуальный patched uTLS", fingerprint));
     saveButton(body, () => ({ autoUpdate:autoUpdate.value }));
   }
 
   function buildAbout() {
-    title("О ShadowVPN", "Клиент для Android", buildSettings);
+    title("О ShadowVPN", "Версия и техническая информация", buildSettings);
     const body = $("panelBody"); body.replaceChildren(); body.scrollTop = 0;
     const mark = document.createElement("div"); mark.className = "about-mark";
     mark.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 3v8M6.5 6.5a7 7 0 1 0 11 0"/></svg>';
     const copy = document.createElement("div"); copy.className = "about-copy";
-    copy.innerHTML = '<h2>SHADOWVPN</h2><p>Версия 0.15.2<br>Android VPN · Xray · patched uTLS</p>';
-    body.append(mark, copy);
+    const version = snapshot.appVersion || "0.16.0";
+    copy.innerHTML = `<h2>SHADOWVPN</h2><p>Версия ${version}<br>Android VPN · Xray · Cronet · patched uTLS</p>`;
+    body.append(mark, copy, section("УСТРОЙСТВО"));
+    const copyHwid = document.createElement("button"); copyHwid.className = "secondary"; copyHwid.textContent = "Копировать";
+    copyHwid.addEventListener("click", () => native.copyText(snapshot.settings?.hwid || ""));
+    body.append(settingRow("HWID устройства", snapshot.settings?.hwid || "Недоступно", copyHwid));
+    body.append(section("TLS FINGERPRINTS"));
+    const fingerprints = document.createElement("div"); fingerprints.className = "tech-card";
+    fingerprints.innerHTML = '<div class="tech-card-heading"><b>patched uTLS</b><span>актуальные профили</span></div><div class="fingerprint-grid"><span><b>Chrome</b><small>152 · по умолчанию</small></span><span><b>Firefox</b><small>148</small></span><span><b>Edge</b><small>Chrome 152</small></span><span><b>Safari</b><small>26.3</small></span><span><b>Random</b><small>randomized</small></span></div><p>Профиль из подписки может переопределить значение по умолчанию.</p>';
+    body.append(fingerprints, section("ДВИЖКИ И ПРОТОКОЛЫ"));
+    const engine = document.createElement("div"); engine.className = "tech-card tech-list";
+    engine.innerHTML = '<div><span>VPN-движок</span><b>Xray Core · Android TUN</b></div><div><span>QUIC / Naive</span><b>Cronet · HTTP/2 · HTTP/3</b></div><div><span>Профили</span><b>VLESS · VMess · Trojan · Shadowsocks · Hysteria2 · Naive</b></div><div><span>Android</span><b>API 29+ · arm64-v8a · x86_64</b></div>';
+    body.append(engine);
   }
 
   function buildSubscriptions(fromSettings = false) {
@@ -649,6 +731,7 @@
   function closeTopLayer() {
     if (!panelOverlay.hidden && panelBackAction) { panelBackAction(); return true; }
     if (closePanel()) return true;
+    if (!$("sortMenu").hidden) { toggleSortMenu(false); return true; }
     if (sheetOpen) return closeServers();
     if (!$("appMenu").hidden) { closeMenu(); return true; }
     return false;
@@ -656,22 +739,41 @@
 
   $("powerButton").addEventListener("click", () => native.toggleVpn());
   $("menuButton").addEventListener("click", event => { event.stopPropagation(); $("appMenu").hidden = !$("appMenu").hidden; });
-  document.addEventListener("click", event => { if (!event.target.closest(".app-menu,#menuButton")) closeMenu(); });
+  document.addEventListener("click", event => {
+    if (!event.target.closest(".app-menu,#menuButton")) closeMenu();
+    if (!event.target.closest("#sortMenu,#sortButton")) toggleSortMenu(false);
+  });
   document.querySelectorAll("[data-panel]").forEach(button => button.addEventListener("click", () => openPanel(button.dataset.panel)));
   $("refreshButton").addEventListener("click", () => { closeMenu(); native.refreshSubscriptions(); });
   $("closePanel").addEventListener("click", closePanel); panelOverlay.addEventListener("click", event => { if (event.target === panelOverlay) closePanel(); });
   $("closeServers").addEventListener("click", closeServers); serverScrim.addEventListener("click", closeServers);
   $("selectedServerButton").addEventListener("click", openServers);
   $("categories").addEventListener("click", event => { const button=event.target.closest("button[data-category]");if(!button)return;category=button.dataset.category;document.querySelectorAll(".categories button").forEach(item=>item.classList.toggle("active",item===button));renderServers(true); });
-  $("sortButton").addEventListener("click", () => { sortMode=sortMode==="original"?"latency":sortMode==="latency"?"name":"original";showToast(sortMode==="latency"?"Сначала быстрые":sortMode==="name"?"По алфавиту":"Исходный порядок");renderServers(true); });
+  $("sortButton").addEventListener("click", event => { event.stopPropagation(); toggleSortMenu(); });
+  $("sortMenu").addEventListener("click", event => {
+    const button = event.target.closest("button[data-sort]");
+    if (!button) return;
+    sortMode = button.dataset.sort;
+    toggleSortMenu(false);
+    renderServers(true);
+  });
   $("pingButton").addEventListener("click", () => native.pingServers());
   $("welcomeSubmit").addEventListener("click", () => { const value=$("welcomeUrl").value.trim();if(!value.startsWith("https://")){$("welcomeError").textContent="Введите корректную HTTPS-ссылку";return;}$("welcomeError").textContent="";native.saveSubscriptions(JSON.stringify({wifi:value,lte:""})); });
   bindDockGesture(); bindSheetDrag(); bindPanelDrag();
 
-  window.ShadowVPN = { render, closeTopLayer };
+  window.ShadowVPN = {
+    render,
+    closeTopLayer,
+    installedApps(payload) { if (splitAppsReceiver) splitAppsReceiver(payload); },
+    appIcon(packageName, source) {
+      document.querySelectorAll(".installed-app-icon").forEach(slot => {
+        if (slot.dataset.package === packageName) setAppIcon(slot, source);
+      });
+    }
+  };
   if (hasNativeBridge) native.ready();
   else { render({
-    state:"connected",serviceStatus:"Подключено",needsSubscription:false,importRunning:false,pingRunning:false,message:"",
+    state:"connected",serviceStatus:"Подключено",needsSubscription:false,importRunning:false,pingRunning:false,message:"",appVersion:"0.16.0",
     publicIp:"132.243.***",session:"00:02:18",traffic:{downloadSpeed:"25,7 КБ/с",downloadTotal:"6,1 МБ",uploadSpeed:"58,8 КБ/с",uploadTotal:"135 КБ"},
     selected:{id:"preview",name:"Финляндия | Hysteria",countryCode:"fi",protocol:"VLESS",transport:"TCP",auto:false,selected:true,latency:43,available:true,subscription:{title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000}},
     servers:[
@@ -680,5 +782,25 @@
       {id:"nl",name:"Нидерланды | Torrent",countryCode:"nl",protocol:"VLESS",transport:"TCP",auto:false,selected:false,latency:76,available:true},
       {id:"pl",name:"Польша | Gemini | gRPC",countryCode:"pl",protocol:"VLESS",transport:"GRPC",auto:false,selected:false,available:false}
     ],subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte"},settings:{autoUpdate:"1440",pingOnOpen:true,dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",autoProfiles:[],hwid:"preview-device",batteryUnrestricted:false}
-  }); }
+  });
+    // Browser-only visual previews; the Android bridge never executes this.
+    const previewParams = new URLSearchParams(location.search);
+    const preview = previewParams.get("preview");
+    if (previewParams.has("disconnected")) {
+      render({
+        state:"disconnected",
+        serviceStatus:"",
+        publicIp:"85.95.178.108",
+        session:"",
+        traffic:{downloadSpeed:"0 Б/с",downloadTotal:"0 Б",uploadSpeed:"0 Б/с",uploadTotal:"0 Б"}
+      });
+    }
+    if (preview === "servers") openServers();
+    if (preview === "settings") openPanel("settings");
+    if (["connection", "split", "application"].includes(preview)) {
+      panelOverlay.hidden = false;
+      ({ connection:buildConnectionSettings, split:buildSplitTunneling, application:buildApplicationSettings })[preview]();
+    }
+    if (previewParams.has("back")) $("panelBack").click();
+  }
 })();

@@ -21,6 +21,7 @@ var mobile struct {
 	profiles  []Profile
 	prepared  []byte
 	instance  *core.Instance
+	naive     *naiveRuntime
 	seed      string
 	importing bool
 	options   mobileOptions
@@ -186,6 +187,10 @@ func Prepare(profileID string, dohURL string) error {
 	if mobile.instance != nil || mobile.importing {
 		return errors.New("VPN занят обновлением или уже подключён")
 	}
+	if mobile.naive != nil {
+		_ = mobile.naive.Close()
+		mobile.naive = nil
+	}
 	mobile.prepared = nil
 	options := mobile.options
 	dnsID := options.DNSID
@@ -202,7 +207,7 @@ func Prepare(profileID string, dohURL string) error {
 	}
 
 	if isAutoProfileID(profileID) {
-		candidates := mobile.profiles
+		candidates := profilesWithoutProtocol(mobile.profiles, "naive")
 		if len(options.AutoProfileIDs) > 0 {
 			allowed := make(map[string]struct{}, len(options.AutoProfileIDs))
 			for _, id := range options.AutoProfileIDs {
@@ -253,11 +258,28 @@ func Prepare(profileID string, dohURL string) error {
 	if err != nil {
 		return errors.New("Не удалось определить IP сервера")
 	}
+	var naive *naiveRuntime
+	if resolved.Protocol == "naive" {
+		naive, err = newNaiveRuntime(resolved)
+		if err != nil {
+			return err
+		}
+	}
 	config, err := makeConfigWithRoutingAndDoH(resolved, dnsID, options.CustomDNS, options.DoHURL, options.Fragmentation, "", routing)
 	if err != nil {
+		if naive != nil {
+			_ = naive.Close()
+		}
 		return err
 	}
 	mobile.prepared, err = androidRuntimeConfig(config, options.TunMTU)
+	if err != nil {
+		if naive != nil {
+			_ = naive.Close()
+		}
+		return err
+	}
+	mobile.naive = naive
 	return err
 }
 
@@ -300,16 +322,43 @@ func Start(tunFD int) error {
 		return err
 	}
 	defer os.Unsetenv("XRAY_TUN_FD")
+	if mobile.naive != nil {
+		if err := mobile.naive.Start(); err != nil {
+			mobile.naive = nil
+			mobile.prepared = nil
+			return err
+		}
+	}
 	config, err := core.LoadConfig("json", bytes.NewReader(mobile.prepared))
 	if err != nil {
+		if mobile.naive != nil {
+			_ = mobile.naive.Close()
+			mobile.naive = nil
+		}
 		return err
 	}
 	instance, err := core.New(config)
 	if err != nil {
+		if mobile.naive != nil {
+			_ = mobile.naive.Close()
+			mobile.naive = nil
+		}
 		return err
+	}
+	if mobile.naive != nil {
+		if err = mobile.naive.Install(instance, "proxy"); err != nil {
+			_ = instance.Close()
+			_ = mobile.naive.Close()
+			mobile.naive = nil
+			return err
+		}
 	}
 	if err = instance.Start(); err != nil {
 		_ = instance.Close()
+		if mobile.naive != nil {
+			_ = mobile.naive.Close()
+			mobile.naive = nil
+		}
 		return err
 	}
 	mobile.instance = instance
@@ -320,10 +369,18 @@ func Stop() error {
 	mobile.Lock()
 	defer mobile.Unlock()
 	mobile.prepared = nil
-	if mobile.instance == nil {
-		return nil
+	var closeErr error
+	if mobile.instance != nil {
+		instance := mobile.instance
+		mobile.instance = nil
+		closeErr = instance.Close()
 	}
-	instance := mobile.instance
-	mobile.instance = nil
-	return instance.Close()
+	if mobile.naive != nil {
+		naive := mobile.naive
+		mobile.naive = nil
+		if err := naive.Close(); closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }

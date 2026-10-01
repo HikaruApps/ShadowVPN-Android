@@ -34,7 +34,7 @@ type pingOptions struct {
 func endpointFromOutbound(out map[string]any) (string, int) {
 	settings, _ := out["settings"].(map[string]any)
 	protocol, _ := out["protocol"].(string)
-	if protocol == "hysteria" {
+	if protocol == "hysteria" || protocol == "naive" {
 		address, _ := settings["address"].(string)
 		return address, integerValue(settings["port"])
 	}
@@ -129,6 +129,14 @@ func httpPingProfileWithOptions(ctx context.Context, profile Profile, method str
 			return 0, "", err
 		}
 	}
+	var naive *naiveRuntime
+	if resolved.Protocol == "naive" {
+		naive, err = newNaiveRuntime(resolved)
+		if err != nil {
+			return 0, "", err
+		}
+		defer naive.Close()
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, "", err
@@ -172,6 +180,14 @@ func httpPingProfileWithOptions(ctx context.Context, profile Profile, method str
 		return 0, "", err
 	}
 	defer instance.Close()
+	if naive != nil {
+		if err = naive.Start(); err != nil {
+			return 0, "", err
+		}
+		if err = naive.Install(instance, "probe"); err != nil {
+			return 0, "", err
+		}
+	}
 	if err = instance.Start(); err != nil {
 		return 0, "", err
 	}
@@ -235,6 +251,11 @@ func pingProfilesWithMethodOptions(parent context.Context, profiles []Profile, m
 			for index := range jobs {
 				profile := profiles[index]
 				probeMethod := method
+				// A Naive profile is backed by Cronet only after the user selects it.
+				// Before that, latency checks verify reachability of its endpoint.
+				if profile.Protocol == "naive" {
+					probeMethod = "tcp"
+				}
 				if probeMethod == "auto" {
 					if profile.Protocol == "hysteria" {
 						probeMethod = "head"

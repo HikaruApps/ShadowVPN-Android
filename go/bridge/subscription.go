@@ -348,7 +348,7 @@ func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, e
 				}
 				proto, _ := out["protocol"].(string)
 				switch proto {
-				case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
+				case "vless", "vmess", "trojan", "shadowsocks", "hysteria", "naive":
 				default:
 					continue
 				}
@@ -383,7 +383,7 @@ func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, e
 			if strings.HasPrefix(line, "#") {
 				continue
 			}
-			if parsed, parseErr := url.Parse(line); parseErr == nil && parsed.Scheme != "vless" && parsed.Scheme != "trojan" && parsed.Scheme != "hysteria2" && parsed.Scheme != "hy2" {
+			if parsed, parseErr := url.Parse(line); parseErr == nil && !supportedURIScheme(parsed.Scheme) {
 				if skippedUnsupported != nil {
 					(*skippedUnsupported)++
 				}
@@ -406,7 +406,7 @@ func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, e
 	}
 	profiles = visible
 	if len(profiles) == 0 {
-		return nil, errors.New("Нет поддерживаемых серверов. Нужна Xray JSON или подписка VLESS/Trojan/Hysteria2")
+		return nil, errors.New("Нет поддерживаемых серверов. Нужна Xray JSON или подписка VLESS/Trojan/Hysteria2/Naive")
 	}
 	if len(profiles) > 500 {
 		return nil, errors.New("В подписке больше 500 серверов")
@@ -421,19 +421,89 @@ func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, e
 	}
 	return unique, nil
 }
+
+func supportedURIScheme(scheme string) bool {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "vless", "trojan", "hysteria2", "hy2", "naive", "naive+https", "naive+quic":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func parseURI(raw string) (Profile, error) {
 	u, e := url.Parse(raw)
 	if e != nil || u.User == nil || u.Hostname() == "" {
 		return Profile{}, errors.New("Некорректная ссылка сервера")
 	}
-	if u.Scheme != "vless" && u.Scheme != "trojan" && u.Scheme != "hysteria2" && u.Scheme != "hy2" {
+	u.Scheme = strings.ToLower(u.Scheme)
+	if !supportedURIScheme(u.Scheme) {
 		return Profile{}, fmt.Errorf("URI-протокол %s пока не поддерживается; используйте Xray JSON", u.Scheme)
 	}
-	port, e := strconv.Atoi(u.Port())
+	portText := u.Port()
+	if portText == "" && strings.HasPrefix(u.Scheme, "naive") {
+		portText = "443"
+	}
+	port, e := strconv.Atoi(portText)
 	if e != nil || port < 1 || port > 65535 {
 		return Profile{}, errors.New("Некорректный порт сервера")
 	}
 	q := u.Query()
+	if strings.HasPrefix(u.Scheme, "naive") {
+		username := u.User.Username()
+		password, _ := u.User.Password()
+		if username == "" {
+			return Profile{}, errors.New("Naive требует имя пользователя")
+		}
+		serverName := strings.TrimSpace(q.Get("sni"))
+		if serverName == "" {
+			serverName = strings.TrimSpace(q.Get("serverName"))
+		}
+		if serverName == "" {
+			serverName = u.Hostname()
+		}
+		quic := u.Scheme == "naive+quic" || q.Get("quic") == "1" || strings.EqualFold(q.Get("quic"), "true")
+		concurrency := 1
+		if rawConcurrency := firstNonEmpty(q.Get("insecure-concurrency"), q.Get("insecure_concurrency")); rawConcurrency != "" {
+			parsed, err := strconv.Atoi(rawConcurrency)
+			if err != nil || parsed < 1 || parsed > 8 {
+				return Profile{}, errors.New("Naive insecure-concurrency должен быть от 1 до 8")
+			}
+			concurrency = parsed
+		}
+		congestion := strings.ToLower(firstNonEmpty(q.Get("congestion-control"), q.Get("congestion_control")))
+		switch congestion {
+		case "", "bbr", "bbr2", "cubic", "reno":
+		default:
+			return Profile{}, errors.New("Неизвестный congestion-control для Naive QUIC")
+		}
+		transport := "h2"
+		if quic {
+			transport = "quic"
+		}
+		out := map[string]any{
+			"tag":      "proxy",
+			"protocol": "naive",
+			"settings": map[string]any{
+				"address": u.Hostname(), "port": port,
+				"username": username, "password": password,
+				"serverName": serverName, "quic": quic,
+				"insecureConcurrency": concurrency,
+				"congestionControl":   congestion,
+			},
+			"streamSettings": map[string]any{"network": transport, "security": "tls"},
+		}
+		return newProfile(u.Fragment, out), nil
+	}
 	if u.Scheme == "hysteria2" || u.Scheme == "hy2" {
 		if q.Get("obfs") != "" || q.Get("obfs-password") != "" {
 			return Profile{}, errors.New("Hysteria2 obfs пока не поддерживается")
@@ -797,6 +867,13 @@ func makeAutoConfigWithRoutingAndDoH(profiles []Profile, dnsID string, customSer
 }
 
 func configuredOutbound(p Profile, tag string, fragmentation bool) (map[string]any, error) {
+	if p.Protocol == "naive" {
+		// core.LoadConfig needs a registered protocol. Android replaces this
+		// inert placeholder with naiveOutboundHandler before the instance starts.
+		return map[string]any{
+			"tag": tag, "protocol": "freedom", "settings": map[string]any{},
+		}, nil
+	}
 	outbound, err := cloneObject(p.outbound)
 	if err != nil {
 		return nil, err

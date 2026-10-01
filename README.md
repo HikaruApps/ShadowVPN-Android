@@ -21,7 +21,7 @@ run, download the `ShadowVPN-Android-debug` artifact and unzip it to get
 
 ## Build
 
-Install JDK 17, Android SDK platform 35, Android NDK 27.2.12479018, Go 1.27 or
+Install JDK 17, Android SDK platform 35, Android NDK 28.0.13004108, Go 1.27 or
 newer, and `gomobile`/`gobind` compatible with that Go version. Gradle 8.9 is
 provided by the checked-in wrapper. Set `ANDROID_HOME` to the SDK directory.
 From this repository root:
@@ -46,13 +46,18 @@ contains arm64 and x86_64 Android libraries, is generated during the build and
 is ignored by Git. A GitHub Actions workflow builds it and runs the Go tests.
 The bridge scripts pass `-checklinkname=0`, which is required by Xray's
 transitive Android network-interface dependency `github.com/wlynxg/anet`.
+Native libraries are compressed in the APK and extracted by Android at install
+time; this keeps the download substantially smaller than the installed size.
 
 ## Features
 
 - Separate Wi-Fi and LTE HTTPS subscription sources with subscription traffic
   metadata.
-- Desktop-compatible subscription parsing, including VLESS, Trojan, Hysteria2
-  and Xray JSON profiles.
+- Desktop-compatible subscription parsing, including VLESS, Trojan, Hysteria2,
+  NaiveProxy over HTTP/2 or QUIC/HTTP/3, and Xray JSON profiles. Naive links use
+  `naive+https://user:pass@host` or `naive+quic://user:pass@host`. The embedded
+  Cronet transport is installed directly as an Xray outbound; it does not open
+  a localhost SOCKS listener or add a second TUN/VPN core.
 - Selection of a server or Auto/Auto without Russia, Android VPN permission
   prompt, foreground VPN service and Android TUN descriptor passed into the
   pinned Xray core.
@@ -65,7 +70,9 @@ transitive Android network-interface dependency `github.com/wlynxg/anet`.
   settings shortcuts.
 - Patched local uTLS source with an updated ShadowVPN ClientHello profile.
 
-Auto uses the desktop TCP pre-check and Xray leastPing/Observatory. The Windows
+Auto uses the desktop TCP pre-check and Xray leastPing/Observatory; Naive
+profiles are selected manually because Xray Observatory cannot balance an
+external Cronet transport. The Windows
 WFP Kill Switch cannot be reused on Android; the app opens Android's native VPN
 lockdown settings instead.
 

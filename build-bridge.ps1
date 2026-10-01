@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = $PSScriptRoot
 $mobileVersion = 'v0.0.0-20260908204917-8b95e45f8d3e'
-$ndkVersion = '27.2.12479018'
+$ndkVersion = '28.0.13004108'
 if (-not $env:ANDROID_HOME) { throw 'ANDROID_HOME is not set' }
 $ndkDirectory = Join-Path $env:ANDROID_HOME "ndk\$ndkVersion"
 if (-not (Test-Path -LiteralPath $ndkDirectory -PathType Container)) {
@@ -26,7 +26,7 @@ try {
     try {
         & go get -tool "golang.org/x/mobile/cmd/gobind@$mobileVersion"
         if ($LASTEXITCODE -ne 0) { throw "go get failed with exit code $LASTEXITCODE" }
-        & gomobile bind '-androidapi=29' '-ldflags=-checklinkname=0' `
+        & gomobile bind '-androidapi=29' '-ldflags=-checklinkname=0 -s -w' `
             '-target=android/arm64,android/amd64' '-javapkg=net.shadownet.shadowvpn.core' `
             -o (Join-Path $repoRoot 'app\libs\shadowvpn-core.aar') ./bridge
         if ($LASTEXITCODE -ne 0) { throw "gomobile bind failed with exit code $LASTEXITCODE" }

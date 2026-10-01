@@ -70,6 +70,16 @@ func withoutRussianProfiles(profiles []Profile) []Profile {
 	return result
 }
 
+func profilesWithoutProtocol(profiles []Profile, protocol string) []Profile {
+	result := make([]Profile, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile.Protocol != protocol {
+			result = append(result, profile)
+		}
+	}
+	return result
+}
+
 func profilesForRenderer(profiles []Profile) []Profile {
 	result := make([]Profile, 0, len(profiles)+2)
 	result = append(result, autoProfile(), autoNoRUProfile())
@@ -107,12 +117,12 @@ func pingProfilesWithAutoMethod(parent context.Context, profiles []Profile, meth
 func pingProfilesWithAutoMethodOptions(parent context.Context, profiles []Profile, method string, options pingOptions) []PingResult {
 	results := pingProfilesWithMethodOptions(parent, profiles, method, options)
 	auto := PingResult{ID: autoProfileID}
-	if _, best, ok := fastestProfile(profiles, results); ok {
+	if _, best, ok := fastestProfile(profilesWithoutProtocol(profiles, "naive"), results); ok {
 		auto.Available = true
 		auto.LatencyMS = best.LatencyMS
 	}
 	autoNoRU := PingResult{ID: autoNoRUProfileID}
-	if _, best, ok := fastestProfile(withoutRussianProfiles(profiles), results); ok {
+	if _, best, ok := fastestProfile(profilesWithoutProtocol(withoutRussianProfiles(profiles), "naive"), results); ok {
 		autoNoRU.Available = true
 		autoNoRU.LatencyMS = best.LatencyMS
 	}

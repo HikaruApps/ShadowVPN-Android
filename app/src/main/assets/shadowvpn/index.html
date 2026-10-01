@@ -47,10 +47,13 @@
           </div>
         </div>
         <div class="connection-details" id="connectionDetails">
-          <i class="privacy-dot"></i>
-          <span class="ip-label" id="ipLabel">Ваш IP</span>
-          <span class="ip-value" id="ipValue">Определяем…</span>
-          <span class="connection-duration" id="connectionDuration" hidden>·&nbsp; Сеанс <b id="sessionTime">00:00:00</b></span>
+          <span class="connection-ip">
+            <i class="privacy-dot"></i>
+            <span class="ip-label" id="ipLabel">Ваш IP</span>
+            <span class="ip-value" id="ipValue">Определяем…</span>
+          </span>
+          <i class="details-divider" id="detailsDivider" hidden></i>
+          <span class="connection-duration" id="connectionDuration" hidden><span>Сеанс</span><b id="sessionTime">00:00:00</b></span>
         </div>
       </section>
     </main>
@@ -77,11 +80,16 @@
       <header class="sheet-header" id="sheetHeader">
         <div><h1>Выбор сервера</h1><p id="serverCount">Все серверы</p></div>
         <div class="sheet-actions">
-          <button id="sortButton" aria-label="Сортировка"><svg viewBox="0 0 24 24"><path d="M8 6h10M8 12h7M8 18h4M4 5v14"/></svg></button>
-          <button id="pingButton" aria-label="Проверить задержку"><svg viewBox="0 0 24 24"><path d="M5 16a8 8 0 0 1 14 0M8 14a5 5 0 0 1 8 0M12 16l3-5"/></svg></button>
+          <button id="sortButton" aria-label="Сортировка" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M8.5 6.5H19M8.5 12H16M8.5 17.5H13"/><path d="M5 5v14m0 0-2-2m2 2 2-2"/></svg></button>
+          <button id="pingButton" aria-label="Проверить задержку"><svg class="speedometer-icon ping-gauge" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18a8.5 8.5 0 1 1 16 0" stroke-width="1.65"/><path d="m6.5 14.2-1.35-.55M8.7 11.4l-.9-1.15M12 10V8.5M15.3 11.4l.9-1.15M17.5 14.2l1.35-.55" stroke-width="1.35"/><path class="ping-gauge-needle" d="M12 17V11" stroke-width="1.9"/><circle cx="12" cy="17" r="1.35"/></svg></button>
           <button id="closeServers" aria-label="Закрыть"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
         </div>
       </header>
+      <div class="sort-menu" id="sortMenu" hidden role="menu" aria-label="Сортировка серверов">
+        <button data-sort="name" role="menuitem"><span><b>По алфавиту</b><small>А–Я · A–Z</small></span><svg viewBox="0 0 24 24"><path d="m6 12 4 4 8-8"/></svg></button>
+        <button data-sort="original" role="menuitem"><span><b>Как в подписке</b><small>Исходный порядок</small></span><svg viewBox="0 0 24 24"><path d="m6 12 4 4 8-8"/></svg></button>
+        <button data-sort="latency" role="menuitem"><span><b>По задержке</b><small>Минимальный пинг</small></span><svg viewBox="0 0 24 24"><path d="m6 12 4 4 8-8"/></svg></button>
+      </div>
       <div class="categories" id="categories">
         <button class="active" data-category="all">Все</button><button data-category="fast">Быстрые</button><button data-category="p2p">P2P</button><button data-category="gemini">Gemini</button><button data-category="warp">WARP</button><button data-category="no-tls">No TLS</button>
       </div>

@@ -2,4 +2,5 @@
 build/
 app/build/
 app/libs/*.aar
+app/libs/*-sources.jar
 local.properties
