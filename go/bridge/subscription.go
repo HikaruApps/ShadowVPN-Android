@@ -32,6 +32,11 @@ type Profile struct {
 	address  string
 	port     int
 	outbound map[string]any
+	// Extras imported from full Xray JSON configs: freedom dialer outbounds the
+	// proxy chains through (fragment/noise) and sanitized routing rules.
+	chain          []map[string]any
+	rules          []map[string]any
+	domainStrategy string
 }
 
 func newProfile(name string, out map[string]any) Profile {
@@ -208,7 +213,7 @@ func fetchSubscription(ctx context.Context, address string) ([]Profile, int, sub
 	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
 		return nil, 0, subscriptionMetadata{}, errors.New("Нужна HTTPS-ссылка на подписку")
 	}
-	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
+	client := &http.Client{Transport: subscriptionTransport(), Timeout: 20 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || r.URL.Scheme != "https" || r.URL.User != nil {
 			return errors.New("Недопустимое перенаправление")
 		}
@@ -323,54 +328,11 @@ func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, e
 	s := strings.TrimSpace(strings.TrimPrefix(string(b), "\ufeff"))
 	profiles := []Profile{}
 	if strings.HasPrefix(s, "[") || strings.HasPrefix(s, "{") {
-		var items []map[string]any
-		if strings.HasPrefix(s, "[") {
-			if json.Unmarshal([]byte(s), &items) != nil {
-				return nil, errors.New("Некорректный JSON")
-			}
-		} else {
-			var item map[string]any
-			if json.Unmarshal([]byte(s), &item) != nil {
-				return nil, errors.New("Некорректный JSON")
-			}
-			items = append(items, item)
+		parsed, err := parseXrayJSON([]byte(s), skippedUnsupported)
+		if err != nil {
+			return nil, err
 		}
-		for _, item := range items {
-			name, _ := item["remarks"].(string)
-			outs, _ := item["outbounds"].([]any)
-			if _, ok := item["protocol"]; ok {
-				outs = []any{item}
-			}
-			for _, raw := range outs {
-				out, ok := raw.(map[string]any)
-				if !ok {
-					continue
-				}
-				proto, _ := out["protocol"].(string)
-				switch proto {
-				case "vless", "vmess", "trojan", "shadowsocks", "hysteria", "naive":
-				default:
-					continue
-				}
-				// Import connection settings only. Never accept subscription-supplied listeners,
-				// routing, local source addresses, proxy chaining, or socket/interface overrides.
-				clean := map[string]any{"protocol": proto, "settings": out["settings"], "tag": "proxy"}
-				if st, ok := out["streamSettings"].(map[string]any); ok {
-					copy := map[string]any{}
-					for k, v := range st {
-						if k != "sockopt" && k != "finalmask" {
-							copy[k] = v
-						}
-					}
-					clean["streamSettings"] = copy
-				}
-				if name == "" {
-					name, _ = out["tag"].(string)
-				}
-				profiles = append(profiles, newProfile(name, clean))
-				break
-			}
-		}
+		profiles = parsed
 	} else {
 		if !strings.Contains(s, "://") {
 			decoded, e := decodeBase64(s)
@@ -379,21 +341,27 @@ func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, e
 			}
 			s = string(decoded)
 		}
+		var firstErr error
 		for _, line := range strings.Fields(s) {
 			if strings.HasPrefix(line, "#") {
 				continue
 			}
-			if parsed, parseErr := url.Parse(line); parseErr == nil && !supportedURIScheme(parsed.Scheme) {
+			p, e := parseShareLink(line)
+			if e != nil {
+				// One malformed or unsupported line must not discard the rest
+				// of the subscription.
 				if skippedUnsupported != nil {
 					(*skippedUnsupported)++
 				}
+				if firstErr == nil {
+					firstErr = e
+				}
 				continue
 			}
-			p, e := parseURI(line)
-			if e != nil {
-				return nil, e
-			}
 			profiles = append(profiles, p)
+		}
+		if len(profiles) == 0 && firstErr != nil {
+			return nil, firstErr
 		}
 	}
 	visible := profiles[:0]
@@ -560,52 +528,10 @@ func parseURI(raw string) (Profile, error) {
 			security = "none"
 		}
 	}
-	stream := map[string]any{}
-	network := q.Get("type")
-	if network == "" {
-		network = "tcp"
-	}
-	stream["network"] = network
-	stream["security"] = security
-	switch security {
-	case "tls":
-		tls := map[string]any{"serverName": q.Get("sni"), "fingerprint": q.Get("fp")}
-		if q.Get("alpn") != "" {
-			tls["alpn"] = strings.Split(q.Get("alpn"), ",")
-		}
-		stream["tlsSettings"] = tls
-	case "reality":
-		stream["realitySettings"] = map[string]any{"serverName": q.Get("sni"), "fingerprint": q.Get("fp"), "publicKey": q.Get("pbk"), "shortId": q.Get("sid"), "spiderX": q.Get("spx")}
-	case "none":
-	default:
-		return Profile{}, errors.New("Неизвестный тип защиты соединения")
-	}
-	switch network {
-	case "tcp", "raw":
-		if h := q.Get("headerType"); h != "" && h != "none" {
-			return Profile{}, errors.New("TCP headerType требует Xray JSON")
-		}
-	case "ws":
-		stream["wsSettings"] = map[string]any{"path": q.Get("path"), "headers": map[string]string{"Host": q.Get("host")}}
-	case "grpc":
-		stream["grpcSettings"] = map[string]any{"serviceName": q.Get("serviceName"), "authority": q.Get("authority"), "multiMode": q.Get("mode") == "multi"}
-	case "xhttp":
-		x := map[string]any{"path": q.Get("path"), "host": q.Get("host")}
-		if q.Get("mode") != "" {
-			x["mode"] = q.Get("mode")
-		}
-		if q.Get("extra") != "" {
-			var extra map[string]any
-			if json.Unmarshal([]byte(q.Get("extra")), &extra) != nil {
-				return Profile{}, errors.New("Некорректный XHTTP extra")
-			}
-			x["extra"] = extra
-		}
-		stream["xhttpSettings"] = x
-	case "httpupgrade":
-		stream["httpupgradeSettings"] = map[string]any{"path": q.Get("path"), "host": q.Get("host")}
-	default:
-		return Profile{}, fmt.Errorf("Транспорт %s требует Xray JSON", network)
+	q.Set("security", security)
+	stream, err := streamFromQuery(q)
+	if err != nil {
+		return Profile{}, err
 	}
 	out := map[string]any{"tag": "proxy", "protocol": u.Scheme, "streamSettings": stream}
 	if u.Scheme == "vless" {
@@ -979,4 +905,60 @@ func cloneObject(value map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// streamFromQuery builds Xray streamSettings from share-link query parameters.
+func streamFromQuery(q url.Values) (map[string]any, error) {
+	security := q.Get("security")
+	if security == "" {
+		security = "none"
+	}
+	stream := map[string]any{}
+	network := q.Get("type")
+	if network == "" {
+		network = "tcp"
+	}
+	stream["network"] = network
+	stream["security"] = security
+	switch security {
+	case "tls":
+		tls := map[string]any{"serverName": q.Get("sni"), "fingerprint": q.Get("fp")}
+		if q.Get("alpn") != "" {
+			tls["alpn"] = strings.Split(q.Get("alpn"), ",")
+		}
+		stream["tlsSettings"] = tls
+	case "reality":
+		stream["realitySettings"] = map[string]any{"serverName": q.Get("sni"), "fingerprint": q.Get("fp"), "publicKey": q.Get("pbk"), "shortId": q.Get("sid"), "spiderX": q.Get("spx")}
+	case "none":
+	default:
+		return nil, errors.New("Неизвестный тип защиты соединения")
+	}
+	switch network {
+	case "tcp", "raw":
+		if h := q.Get("headerType"); h != "" && h != "none" {
+			return nil, errors.New("TCP headerType требует Xray JSON")
+		}
+	case "ws":
+		stream["wsSettings"] = map[string]any{"path": q.Get("path"), "headers": map[string]string{"Host": q.Get("host")}}
+	case "grpc":
+		stream["grpcSettings"] = map[string]any{"serviceName": q.Get("serviceName"), "authority": q.Get("authority"), "multiMode": q.Get("mode") == "multi"}
+	case "xhttp":
+		x := map[string]any{"path": q.Get("path"), "host": q.Get("host")}
+		if q.Get("mode") != "" {
+			x["mode"] = q.Get("mode")
+		}
+		if q.Get("extra") != "" {
+			var extra map[string]any
+			if json.Unmarshal([]byte(q.Get("extra")), &extra) != nil {
+				return nil, errors.New("Некорректный XHTTP extra")
+			}
+			x["extra"] = extra
+		}
+		stream["xhttpSettings"] = x
+	case "httpupgrade":
+		stream["httpupgradeSettings"] = map[string]any{"path": q.Get("path"), "host": q.Get("host")}
+	default:
+		return nil, fmt.Errorf("Транспорт %s требует Xray JSON", network)
+	}
+	return stream, nil
 }

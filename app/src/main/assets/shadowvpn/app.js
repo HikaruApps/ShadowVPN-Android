@@ -45,6 +45,7 @@
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.7 5.6 3.7 9s-1.2 6.4-3.7 9c-2.5-2.6-3.7-5.6-3.7-9S9.5 5.6 12 3Z"/>',
     servers: '<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>',
     connection: '<path d="M5 12.5a10 10 0 0 1 14 0M8 15.5a5.5 5.5 0 0 1 8 0M12 19h.01"/>',
+    routing: '<circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H14a4 4 0 0 0 4-4V8.5M15.5 6H10a4 4 0 0 0-4 4v5.5"/>',
     split: '<path d="M6 3v6a3 3 0 0 0 3 3h6a3 3 0 0 1 3 3v6M18 3v6a3 3 0 0 1-3 3"/><path d="M9 12a3 3 0 0 0-3 3v6"/>',
     application: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/>',
     logs: '<path d="M4 5h16v14H4z"/><path d="m8 10 2 2-2 2M13 14h3"/>',
@@ -122,6 +123,7 @@
 
   function matchesCategory(server, name) {
     if (name === "all") return true;
+    if (name.startsWith("source:")) return !server.auto && server.source === name.slice(7);
     if (server.auto) return false;
     const title = server.name.toLowerCase();
     if (name === "fast") return title.includes("hysteria") || title.includes(" ws");
@@ -179,11 +181,24 @@
     if (signature === categoriesSignature) return;
     categoriesSignature = signature;
     let reset = false;
+    $("categories").querySelectorAll("button[data-source]").forEach(button => button.remove());
+    const sources = [...new Set(snapshot.servers.filter(server => !server.auto && server.source).map(server => server.source))];
+    if (sources.length > 1) {
+      const labels = { manual: "Свои" };
+      const anchor = $("categories").querySelector('button[data-category="all"]');
+      sources.reverse().forEach(source => {
+        const chip = el("button", null, labels[source] || source);
+        chip.dataset.category = `source:${source}`;
+        chip.dataset.source = "1";
+        anchor.after(chip);
+      });
+    }
     $("categories").querySelectorAll("button[data-category]").forEach(button => {
       const name = button.dataset.category;
       const empty = name !== "all" && !snapshot.servers.some(server => matchesCategory(server, name));
       button.hidden = empty;
       if (empty && name === category) reset = true;
+      button.classList.toggle("active", name === category);
     });
     if (reset) setCategory("all");
     $("categories").hidden = $("categories").querySelectorAll("button:not([hidden])").length < 2;
@@ -324,8 +339,8 @@
     setText("dockPing", ping.text);
     $("dockPing").className = `latency ${ping.cls}`;
     $("pingButton").classList.toggle("running", !!snapshot.pingRunning);
-    $("pingButton").disabled = connected || !!snapshot.pingRunning;
-    $("refreshButton").disabled = connected || !!snapshot.importRunning;
+    $("pingButton").disabled = !!snapshot.pingRunning;
+    $("refreshButton").disabled = !!snapshot.importRunning;
     renderServers();
 
     $("welcome").hidden = !snapshot.needsSubscription;
@@ -603,7 +618,10 @@
 
   function saveActions(collect) {
     return actions(button("Сохранить", "primary", () => {
-      native.saveSettings(JSON.stringify({ ...(snapshot.settings || {}), ...collect() }));
+      // Keep the local copy current so a second page saved before Android
+      // answers does not send stale values back.
+      snapshot.settings = { ...(snapshot.settings || {}), ...collect() };
+      native.saveSettings(JSON.stringify(snapshot.settings));
       buildSettings();
     }));
   }
@@ -613,7 +631,8 @@
     body.append(
       group(null,
         navRow("servers", "Серверы", "Подписки и автовыбор", buildServerSettings),
-        navRow("connection", "Соединение", "DNS, MTU и маршрутизация", buildConnectionSettings),
+        navRow("connection", "Соединение", "DNS, MTU, IPv6 и локальная сеть", buildConnectionSettings),
+        navRow("routing", "Маршрутизация", "Что идёт через VPN, а что напрямую", buildRoutingSettings),
         navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling),
         navRow("application", "Приложение", "Фоновая работа и обновления", buildApplicationSettings)),
       group(null,
@@ -650,41 +669,103 @@
     }, panelBody, 40);
     body.append(saveActions(() => ({
       pingOnOpen: isOn(pingOnOpen),
-      autoProfiles: servers.filter(server => chosen.has(server.id)).map(server => server.id)
+      autoProfiles: chosen.size === servers.length ? [] : servers.filter(server => chosen.has(server.id)).map(server => server.id)
     })));
   }
 
   function buildConnectionSettings() {
     const body = page("Соединение", buildSettings);
     const s = snapshot.settings || {};
-    const dns = selectControl([["subscription-doh","Из подписки"],["cloudflare","Cloudflare"],["google","Google"],["quad9","Quad9"]], s.dnsProvider);
-    const fragmentation = switchControl(!!s.fragmentation);
-    const mtu = selectControl([["1280","1280"],["1360","1360"],["1400","1400"],["1500","1500"]], s.tunMtu || "1400");
+    const dns = selectControl([["subscription-doh","Из подписки"],["cloudflare","Cloudflare"],["google","Google"],["quad9","Quad9"],["custom","Свой"]], s.dnsProvider);
+    const customDns = el("textarea", "field");
+    customDns.placeholder = "1.1.1.1\n8.8.8.8";
+    customDns.value = s.customDns || "";
+    customDns.spellcheck = false;
+    customDns.rows = 2;
+    const customRow = row("Свои DNS-серверы", "До четырёх IPv4 или IPv6, по одному на строку", customDns);
+    customRow.classList.add("stack");
+    const syncDns = () => { customRow.hidden = dns.value !== "custom"; };
+    dns.addEventListener("change", syncDns);
+    syncDns();
+    const dnsHint = { "subscription-doh": s.doh || "DoH из подписки", cloudflare: "1.1.1.1", google: "8.8.8.8", quad9: "9.9.9.9", custom: "Свои серверы" };
+    const dnsRow = row("DNS", null, dns);
+    const dnsDetail = el("small", null, dnsHint[dns.value] || "");
+    dnsRow.querySelector(".row-copy").append(dnsDetail);
+    dns.addEventListener("change", () => { dnsDetail.textContent = dnsHint[dns.value] || ""; });
     const ipv6 = switchControl(!!s.ipv6Enabled);
-    body.append(group("Сеть",
-      row("DNS", s.doh || "Системный DNS", dns),
-      row("Фрагментация TLS", "Помогает обходить DPI", fragmentation),
-      row("MTU туннеля", "1400 подходит для большинства сетей", mtu),
-      row("IPv6", "Только если сервер его поддерживает", ipv6),
-      row("Kill Switch", "Системная блокировка без VPN",
-        button("Открыть", "secondary", () => native.openVpnSettings(), true))));
+    const lan = switchControl(s.lanDirect !== false);
+    const mtu = selectControl([["1280","1280"],["1360","1360"],["1400","1400"],["1500","1500"]], s.tunMtu || "1400");
+    const fragmentation = switchControl(!!s.fragmentation);
+    body.append(
+      group("DNS", dnsRow, customRow),
+      el("p", "group-note", "Все DNS-запросы идут через VPN, провайдер их не видит."),
+      group("Сеть",
+        row("IPv6", "Включайте, если сервер поддерживает IPv6", ipv6),
+        row("Локальная сеть напрямую", "Роутер, принтеры и трансляция на ТВ без VPN", lan),
+        row("MTU туннеля", "1400 подходит для большинства сетей", mtu)),
+      group("Обход блокировок",
+        row("Фрагментация TLS", "Делит ClientHello, помогает против DPI", fragmentation)),
+      group("Защита",
+        row("Kill Switch", "Включите «Постоянная VPN» и «Блокировать без VPN»",
+          button("Открыть", "secondary", () => native.openVpnSettings(), true))));
+    const pingMethod = selectControl([["tcp","TCP"],["head","HTTP HEAD"],["get","HTTP GET"]], s.pingMethod);
+    body.append(group("Проверка задержки", row("Метод", "HTTP точнее, TCP быстрее", pingMethod)));
+    body.append(saveActions(() => ({
+      dnsProvider: dns.value, customDns: customDns.value, fragmentation: isOn(fragmentation), tunMtu: mtu.value,
+      ipv6Enabled: isOn(ipv6), lanDirect: isOn(lan), pingMethod: pingMethod.value
+    })));
+  }
 
-    const routing = selectControl([["full","Весь трафик"],["bypass","Домены напрямую"],["proxy_only","Только выбранные"]], s.routingMode);
+  function buildRoutingSettings() {
+    const body = page("Маршрутизация", buildSettings);
+    const s = snapshot.settings || {};
+    const mode = selectControl([["full","Весь трафик"],["bypass","Кроме правил"],["proxy_only","Только правила"]], s.routingMode);
+    const modeHint = {
+      full: "Правила ниже не применяются",
+      bypass: "Совпавшие с правилами сайты открываются напрямую",
+      proxy_only: "Через VPN идут только совпавшие с правилами сайты"
+    };
+    const modeRow = row("Режим", null, mode);
+    const modeDetail = el("small", null, modeHint[mode.value] || "");
+    modeRow.querySelector(".row-copy").append(modeDetail);
+    mode.addEventListener("change", () => { modeDetail.textContent = modeHint[mode.value] || ""; });
+
     const rules = el("textarea", "field");
     rules.placeholder = "example.com\ngeosite:youtube\ngeoip:ru";
     rules.value = s.routingRules || "";
     rules.spellcheck = false;
-    const rulesRow = row("Правила", "По одному на строку: домен, geosite: или geoip:", rules);
+    const rulesRow = row("Правила", "По одному на строку: домен, full:, keyword:, regexp:, geosite: или geoip:", rules);
     rulesRow.classList.add("stack");
-    body.append(group("Маршрутизация",
-      row("Режим", "Применится при следующем подключении", routing),
-      rulesRow));
+    const preset = button("Российские сайты напрямую", "secondary", () => {
+      const lines = rules.value.split(/\n/).map(line => line.trim()).filter(Boolean);
+      ["geosite:category-ru", "geoip:ru"].forEach(item => { if (!lines.includes(item)) lines.push(item); });
+      rules.value = lines.join("\n");
+      if (mode.value === "full") { mode.value = "bypass"; mode.dispatchEvent(new Event("change")); }
+    });
+    rulesRow.append(preset);
 
-    const pingMethod = selectControl([["tcp","TCP"],["head","HTTP HEAD"],["get","HTTP GET"]], s.pingMethod);
-    body.append(group("Проверка задержки", row("Метод", null, pingMethod)));
+    const subscriptionRules = switchControl(s.subscriptionRules !== false);
+    body.append(
+      group("Свои правила", modeRow, rulesRow),
+      group("Подписка",
+        row("Правила из подписки", "Маршруты, которые задал провайдер в Xray JSON", subscriptionRules)));
+
+    const geoIP = el("input", "field");
+    geoIP.type = "url"; geoIP.spellcheck = false; geoIP.placeholder = "runetfreedom · geoip.dat";
+    geoIP.value = s.geoipUrl || "";
+    const geoSite = el("input", "field");
+    geoSite.type = "url"; geoSite.spellcheck = false; geoSite.placeholder = "v2fly · dlc.dat";
+    geoSite.value = s.geositeUrl || "";
+    const geoIPRow = row("GeoIP", "Списки IP для geoip:", geoIP);
+    const geoSiteRow = row("GeoSite", "Списки доменов для geosite:", geoSite);
+    geoIPRow.classList.add("stack");
+    geoSiteRow.classList.add("stack");
+    body.append(
+      group("Источники списков", geoIPRow, geoSiteRow),
+      el("p", "group-note", "Списки скачиваются при первом подключении с такими правилами и обновляются раз в неделю. Оставьте поля пустыми, чтобы использовать источники по умолчанию."));
     body.append(saveActions(() => ({
-      dnsProvider: dns.value, fragmentation: isOn(fragmentation), tunMtu: mtu.value, ipv6Enabled: isOn(ipv6),
-      routingMode: routing.value, routingRules: rules.value, pingMethod: pingMethod.value
+      routingMode: mode.value, routingRules: rules.value, subscriptionRules: isOn(subscriptionRules),
+      geoipUrl: geoIP.value.trim(), geositeUrl: geoSite.value.trim()
     })));
   }
 
@@ -841,19 +922,27 @@
     };
     const wifi = slot("wifi", "wifi", "Wi-Fi", "Используется в сетях Wi-Fi");
     const lte = slot("lte", "lte", "Мобильная сеть", "Используется в LTE и 5G");
-    body.append(group("Источники", wifi.node, lte.node));
+    body.append(group("Подписки", wifi.node, lte.node));
+    const manual = el("textarea", "field");
+    manual.spellcheck = false;
+    manual.placeholder = "vless://…\nvmess://…\nss://…\n[{ \"remarks\": …, \"outbounds\": [ … ] }]";
+    manual.value = slots.manual || "";
+    manual.classList.add("mono");
+    const manualRow = row("Свои конфигурации", "Xray JSON или ссылки vless, vmess, trojan, ss, hy2, naive", manual);
+    manualRow.classList.add("stack");
+    body.append(group("Вручную", manualRow));
     body.append(actions(
       button("Сохранить и обновить", "primary", () => {
-        const working = { wifi: wifi.input.value.trim(), lte: lte.input.value.trim() };
+        const working = { wifi: wifi.input.value.trim(), lte: lte.input.value.trim(), manual: manual.value.trim() };
         if ([working.wifi, working.lte].some(value => value && !value.startsWith("https://"))) { showToast("Нужна ссылка, начинающаяся с https://"); return; }
         if (working.wifi && working.wifi === working.lte) { showToast("Для Wi-Fi и мобильной сети нужны разные ссылки"); return; }
         snapshot.subscriptions = working;
         native.saveSubscriptions(JSON.stringify(working));
         if (fromSettings) buildServerSettings(); else closePanel();
       }),
-      button("Удалить обе подписки", "danger", () => {
-        snapshot.subscriptions = {wifi:"",lte:""};
-        native.saveSubscriptions('{"wifi":"","lte":""}');
+      button("Удалить все источники", "danger", () => {
+        snapshot.subscriptions = {wifi:"",lte:"",manual:""};
+        native.saveSubscriptions('{"wifi":"","lte":"","manual":""}');
         closePanel();
       })));
   }
@@ -907,12 +996,14 @@
   $("pingButton").addEventListener("click", () => native.pingServers());
   const submitWelcome = () => {
     const value = $("welcomeUrl").value.trim();
-    if (!value.startsWith("https://")) { $("welcomeError").textContent = "Нужна ссылка, начинающаяся с https://"; return; }
+    if (!value) { $("welcomeError").textContent = "Вставьте ссылку на подписку или конфигурацию"; return; }
     $("welcomeError").textContent = "";
-    native.saveSubscriptions(JSON.stringify({wifi:value,lte:""}));
+    // A single https:// link is a subscription; anything else is a config.
+    const subscription = /^https:\/\/\S+$/.test(value);
+    native.saveSubscriptions(JSON.stringify(subscription ? {wifi:value,lte:"",manual:""} : {wifi:"",lte:"",manual:value}));
   };
   $("welcomeSubmit").addEventListener("click", submitWelcome);
-  $("welcomeUrl").addEventListener("keydown", event => { if (event.key === "Enter") submitWelcome(); });
+  $("welcomeUrl").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !$("welcomeUrl").value.includes("\n")) { event.preventDefault(); submitWelcome(); } });
   bindDockGesture(); bindSheetDrag(); bindPanelDrag();
 
   window.ShadowVPN = {
@@ -933,7 +1024,7 @@
   const mockServers = [{id:"auto",name:"Авто",countryCode:"",protocol:"AUTO",transport:"",auto:true,selected:false,latency:43,available:true}];
   for (let i = 0; i < 120; i++) {
     const code = countries[i % countries.length];
-    mockServers.push({id:`s${i}`,name:`${code.toUpperCase()} ${i + 1} | ${["Hysteria","Torrent","Gemini | gRPC","WARP"][i % 4]}`,countryCode:code,protocol:"VLESS",transport:["TCP","GRPC","WS"][i % 3],auto:false,selected:i === 0,latency:i % 7 === 6 ? 0 : 40 + (i * 37) % 500,available:i % 7 !== 6});
+    mockServers.push({id:`s${i}`,source:i % 5 === 0 ? "LTE" : "Wi-Fi",name:`${code.toUpperCase()} ${i + 1} | ${["Hysteria","Torrent","Gemini | gRPC","WARP"][i % 4]}`,countryCode:code,protocol:"VLESS",transport:["TCP","GRPC","WS"][i % 3],auto:false,selected:i === 0,latency:i % 7 === 6 ? 0 : 40 + (i * 37) % 500,available:i % 7 !== 6});
   }
   const mockApps = Array.from({length: 180}, (_, i) => ({name:`Приложение ${i + 1}`,packageName:`com.example.app${i + 1}`}));
   native.getInstalledApps = () => JSON.stringify({apps: mockApps});
@@ -942,8 +1033,8 @@
     publicIp:"132.243.***",session:"00:02:18",traffic:{downloadSpeed:"25,7 КБ/с",downloadTotal:"6,1 МБ",uploadSpeed:"58,8 КБ/с",uploadTotal:"135 КБ"},
     selected:{...mockServers[1],subscription:{title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000}},
     servers:mockServers,
-    subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte"},
-    settings:{autoUpdate:"1440",pingOnOpen:true,dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
+    subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
+    settings:{autoUpdate:"1440",pingOnOpen:true,dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
   });
   if (params.has("disconnected")) render({ state:"disconnected", serviceStatus:"", publicIp:"85.95.178.108", session:"" });
   if (params.has("error")) render({ state:"error", serviceStatus:"Ошибка: не удалось подключиться к серверу", publicIp:"85.95.178.108" });
@@ -952,8 +1043,8 @@
   if (preview === "menu") setMenu(true);
   if (preview === "welcome") render({ needsSubscription:true });
   if (["settings", "subscriptions", "logs"].includes(preview)) openPanel(preview);
-  if (["connection", "split", "application", "about", "auto"].includes(preview)) {
+  if (["connection", "routing", "split", "application", "about", "auto"].includes(preview)) {
     openPanel("settings");
-    ({ connection:buildConnectionSettings, split:buildSplitTunneling, application:buildApplicationSettings, about:buildAbout, auto:buildServerSettings })[preview]();
+    ({ connection:buildConnectionSettings, routing:buildRoutingSettings, split:buildSplitTunneling, application:buildApplicationSettings, about:buildAbout, auto:buildServerSettings })[preview]();
   }
 })();

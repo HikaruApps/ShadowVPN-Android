@@ -50,22 +50,31 @@ Three layers, all in one process:
      State goes back to JS by `evaluateJavascript("window.ShadowVPN.render(<snapshot>)")`.
      Settings/subscriptions persist in `SharedPreferences("shadowvpn")`. Blocking
      Go calls run on background executors, results posted to the UI thread.
-   - `ShadowVpnService` (`VpnService`, foreground) receives profile/MTU/IPv6/per-app
-     routing via intent extras, calls `Bridge.prepare`, builds the TUN
-     (`172.31.255.2/30`, optional `fd31:ffff::2/126`, default routes), then
-     `Bridge.start(tunFd)`. It always excludes its own package from the VPN so
-     Xray outbound sockets don't loop into the tunnel.
+   - `CoreConfig` builds the Go core's options from preferences; both the activity and the
+     service use it, so the service can connect on its own (always-on VPN after boot,
+     automatic reconnect when settings change or Auto's network changes).
+   - `ShadowVpnService` (`VpnService`, foreground) reads the saved settings, calls
+     `Bridge.configure` + `Bridge.prepare`, builds the TUN (`172.31.255.2/30`, optional
+     `fd31:ffff::2/126`, default routes minus LAN prefixes), then `Bridge.start(tunFd)`.
+     It always excludes its own package from the VPN, so the app's own sockets (pings,
+     subscription downloads, GeoData) never loop into the tunnel.
 3. **Go core** (`go/bridge/`, Java package `net.shadownet.shadowvpn.core.bridge.Bridge`)
-   - Exported gomobile API in `bridge.go`: `SetDeviceSeed`, `DeviceHWID`,
-     `Configure(optionsJSON)`, `ImportSubscription(s)`, `PingProfiles`,
-     `Prepare(profileID, doh)`, `Start(tunFD)`, `Stop`. Data crosses the boundary
-     as JSON strings; global state lives in the mutex-guarded `mobile` struct.
-   - `subscription.go` (parsing VLESS/Trojan/Hysteria2/Naive/Xray JSON), `dns.go`,
-     `bootstrap.go`, `auto.go` (Auto = TCP pre-check + Xray leastPing/Observatory),
-     `ping.go`, `geodata.go`, `identity.go` — mostly shared with the desktop client;
-     prefer keeping them close to upstream.
-   - Android owns IPs/routes/system DNS, so the desktop Xray config's TUN/DNS
-     fields are stripped before start (see `TestAndroidRuntimeConfigRemovesPlatformOwnedTunSettings`).
+   - Exported gomobile API in `bridge.go`: `SetDataDir`, `SetDeviceSeed`, `DeviceHWID`,
+     `LoadCachedProfiles`, `Configure(optionsJSON)`, `ImportSources({"urls","manual"})`,
+     `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `Stop`, `PublicIP`, `Logs`. Data
+     crosses the boundary as JSON strings; global state lives in the mutex-guarded `mobile`
+     struct. Only types gomobile supports may appear in exported signatures.
+   - Android-only files: `xrayjson.go` (Xray JSON import and sanitizing), `links.go`
+     (vmess://, ss://), `android_config.go` (turns the desktop config into the Android
+     runtime config: DNS through `dns-out`, rule ordering, subscription rules, dialer
+     chains, GeoData, no local listeners, warning-level log), `cache.go` (profile cache,
+     GeoData download with codes recorded in `meta.json`).
+   - `subscription.go` (share links), `dns.go`, `bootstrap.go`, `auto.go`, `ping.go`,
+     `geodata.go`, `identity.go` are shared with the desktop client; prefer keeping them
+     close to upstream and put Android behaviour in the files above.
+   - `TestAndroidConfigLoadsInXray`-style tests run generated configs through
+     `core.LoadConfig`; keep doing that for config changes. `GEODATA_DIR=<dir with
+     geoip.dat, geosite.dat> go test ./bridge` also checks against real GeoData.
    - Build tags: `naive_runtime_android.go` + `naive_library_android_{arm64,amd64}.go`
      embed Cronet as a direct Xray outbound (no local SOCKS); `naive_runtime_stub.go`
      (`!android`) lets host tests compile. `platform_other.go` stubs the desktop's

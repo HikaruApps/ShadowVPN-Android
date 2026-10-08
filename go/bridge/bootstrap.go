@@ -103,28 +103,40 @@ func profileWithEndpoint(profile Profile, address, originalHost string) (Profile
 
 func replaceOutboundEndpoint(outbound map[string]any, address string) bool {
 	settings, _ := outbound["settings"].(map[string]any)
+	if settings == nil {
+		return false
+	}
 	protocol, _ := outbound["protocol"].(string)
-	if protocol == "hysteria" || protocol == "naive" {
-		if settings == nil {
+	if protocol == "wireguard" {
+		peers, _ := settings["peers"].([]any)
+		if len(peers) == 0 {
 			return false
 		}
+		peer, _ := peers[0].(map[string]any)
+		_, port, err := net.SplitHostPort(stringValue(peer["endpoint"]))
+		if peer == nil || err != nil {
+			return false
+		}
+		peer["endpoint"] = net.JoinHostPort(address, port)
+		return true
+	}
+	if stringValue(settings["address"]) != "" {
 		settings["address"] = address
 		return true
 	}
-	key := "servers"
-	if protocol == "vless" || protocol == "vmess" {
-		key = "vnext"
+	for _, key := range []string{"vnext", "servers"} {
+		servers, _ := settings[key].([]any)
+		if len(servers) == 0 {
+			continue
+		}
+		server, _ := servers[0].(map[string]any)
+		if server == nil {
+			return false
+		}
+		server["address"] = address
+		return true
 	}
-	servers, _ := settings[key].([]any)
-	if len(servers) == 0 {
-		return false
-	}
-	server, _ := servers[0].(map[string]any)
-	if server == nil {
-		return false
-	}
-	server["address"] = address
-	return true
+	return false
 }
 
 func preserveTransportHostname(outbound map[string]any, hostname string) {

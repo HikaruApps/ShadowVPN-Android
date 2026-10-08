@@ -33,22 +33,36 @@ type pingOptions struct {
 
 func endpointFromOutbound(out map[string]any) (string, int) {
 	settings, _ := out["settings"].(map[string]any)
-	protocol, _ := out["protocol"].(string)
-	if protocol == "hysteria" || protocol == "naive" {
-		address, _ := settings["address"].(string)
-		return address, integerValue(settings["port"])
-	}
-	key := "servers"
-	if protocol == "vless" || protocol == "vmess" {
-		key = "vnext"
-	}
-	raw, _ := settings[key].([]any)
-	if len(raw) == 0 {
+	if settings == nil {
 		return "", 0
 	}
-	server, _ := raw[0].(map[string]any)
-	address, _ := server["address"].(string)
-	return address, integerValue(server["port"])
+	protocol, _ := out["protocol"].(string)
+	if protocol == "wireguard" {
+		peers, _ := settings["peers"].([]any)
+		if len(peers) == 0 {
+			return "", 0
+		}
+		peer, _ := peers[0].(map[string]any)
+		host, portText, err := net.SplitHostPort(stringValue(peer["endpoint"]))
+		if err != nil {
+			return "", 0
+		}
+		port, _ := strconv.Atoi(portText)
+		return host, port
+	}
+	// Current Xray accepts a flat address/port for every client protocol.
+	if address := stringValue(settings["address"]); address != "" {
+		return address, integerValue(settings["port"])
+	}
+	for _, key := range []string{"vnext", "servers"} {
+		raw, _ := settings[key].([]any)
+		if len(raw) == 0 {
+			continue
+		}
+		server, _ := raw[0].(map[string]any)
+		return stringValue(server["address"]), integerValue(server["port"])
+	}
+	return "", 0
 }
 
 func integerValue(value any) int {

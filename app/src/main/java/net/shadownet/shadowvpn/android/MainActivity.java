@@ -45,8 +45,6 @@ import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
-import java.net.InetSocketAddress;
-import java.net.Proxy;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -64,6 +62,7 @@ public final class MainActivity extends Activity {
     private static final int VPN_REQUEST = 100;
     private static final String UI_URL = "file:///android_asset/shadowvpn/index.html";
     private static final int UI_BACKGROUND = Color.rgb(10, 10, 10);
+    private static final int MANUAL_SOURCE = 100;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService appWorker = Executors.newSingleThreadExecutor();
@@ -109,14 +108,13 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
-        preferences = getSharedPreferences("shadowvpn", MODE_PRIVATE);
+        preferences = CoreConfig.preferences(this);
+        CoreConfig.initialize(this);
         migrateSubscriptionSlots();
         restoreSubscriptionInfo();
         selectedId = preferences.getString("selected_id", "");
         doh = preferences.getString("doh", doh);
         try {
-            Bridge.setDeviceSeed(Settings.Secure.getString(
-                    getContentResolver(), Settings.Secure.ANDROID_ID));
             deviceHwid = Bridge.deviceHWID();
         } catch (Exception ignored) { }
         getWindow().setStatusBarColor(UI_BACKGROUND);
@@ -151,8 +149,7 @@ public final class MainActivity extends Activity {
                 if (!UI_URL.equals(url)) return;
                 webReady = true;
                 pushSnapshot();
-                if (subscriptionUrls().length() > 0) importSubscriptions(false);
-                else fetchPublicIp(false);
+                loadCachedServers();
             }
         });
         setContentView(createInsetRoot(webView));
@@ -216,7 +213,7 @@ public final class MainActivity extends Activity {
     }
 
     private void maybeAutoUpdate() {
-        if (ShadowVpnService.connected || importRunning) return;
+        if (importRunning) return;
         String interval = preferences.getString("auto_update", "1440");
         if ("off".equals(interval)) return;
         long minutes;
@@ -228,40 +225,84 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** Shows the servers saved by the last import at once; refreshes only if there are none. */
+    private void loadCachedServers() {
+        worker.execute(() -> {
+            String cached = "";
+            try { cached = Bridge.loadCachedProfiles(); } catch (Exception ignored) { }
+            final String result = cached;
+            ui.post(() -> {
+                if (!result.isEmpty()) {
+                    try { applyServers(parseServers(new JSONObject(result))); }
+                    catch (Exception ignored) { }
+                }
+                if (servers.isEmpty() && hasSources()) importSubscriptions(false);
+                else {
+                    fetchPublicIp(ShadowVpnService.connected);
+                    if (preferences.getBoolean("ping_on_open", false)) runPings();
+                }
+            });
+        });
+    }
+
+    private boolean hasSources() {
+        return subscriptionUrls().length() > 0 || !manualConfigs().isEmpty();
+    }
+
+    private String manualConfigs() {
+        return preferences.getString("manual_configs", "").trim();
+    }
+
+    private List<ServerItem> parseServers(JSONObject root) throws Exception {
+        JSONArray profiles = root.getJSONArray("profiles");
+        List<ServerItem> parsed = new ArrayList<>();
+        for (int i = 0; i < profiles.length(); i++) {
+            JSONObject profile = profiles.getJSONObject(i);
+            parsed.add(new ServerItem(
+                    profile.getString("id"),
+                    profile.optString("name", "Server"),
+                    profile.optString("protocol", "auto"),
+                    profile.optString("transport", "tcp"),
+                    profile.optBoolean("auto", false),
+                    profile.optInt("sourceIndex", -1)));
+        }
+        return parsed;
+    }
+
+    private void applyServers(List<ServerItem> parsed) {
+        servers.clear();
+        servers.addAll(parsed);
+        if (findSelected() == null && !servers.isEmpty()) {
+            selectedId = servers.get(0).id;
+            preferences.edit().putString("selected_id", selectedId).apply();
+        }
+        pushSnapshot();
+    }
+
     private void importSubscriptions(boolean userInitiated) {
         if (importRunning) return;
-        JSONArray sources = subscriptionUrls();
-        if (sources.length() == 0) {
+        if (!hasSources()) {
             uiMessage = "Добавьте ссылку на подписку";
             pushSnapshot();
             return;
         }
+        JSONObject request = new JSONObject();
+        try {
+            request.put("urls", subscriptionUrls());
+            request.put("manual", manualConfigs());
+        } catch (Exception ignored) { }
         importRunning = true;
         if (userInitiated) uiMessage = "Обновляем подписку…";
         pushSnapshot();
         worker.execute(() -> {
             try {
-                Bridge.setDeviceSeed(Settings.Secure.getString(
-                        getContentResolver(), Settings.Secure.ANDROID_ID));
-                JSONObject root = new JSONObject(Bridge.importSubscriptions(sources.toString()));
-                JSONArray profiles = root.getJSONArray("profiles");
+                JSONObject root = new JSONObject(Bridge.importSources(request.toString()));
+                List<ServerItem> parsed = parseServers(root);
                 List<SubscriptionInfo> parsedSubscriptionInfo = parseSubscriptionInfo(
                         root.optJSONArray("sources"));
-                List<ServerItem> parsed = new ArrayList<>();
-                for (int i = 0; i < profiles.length(); i++) {
-                    JSONObject profile = profiles.getJSONObject(i);
-                    parsed.add(new ServerItem(
-                            profile.getString("id"),
-                            profile.optString("name", "Server"),
-                            profile.optString("protocol", "auto"),
-                            profile.optString("transport", "tcp"),
-                            profile.optBoolean("auto", false),
-                            profile.optInt("sourceIndex", -1)));
-                }
                 String importedDoh = extractDoh(root);
+                String sourceError = firstSourceError(root.optJSONArray("sources"));
                 ui.post(() -> {
-                    servers.clear();
-                    servers.addAll(parsed);
                     subscriptionInfo.clear();
                     subscriptionInfo.addAll(parsedSubscriptionInfo);
                     preferences.edit().putString("subscription_info",
@@ -270,15 +311,11 @@ public final class MainActivity extends Activity {
                         doh = importedDoh;
                         preferences.edit().putString("doh", doh).apply();
                     }
-                    if (findSelected() == null && !servers.isEmpty()) {
-                        selectedId = servers.get(0).id;
-                        preferences.edit().putString("selected_id", selectedId).apply();
-                    }
                     importRunning = false;
-                    uiMessage = parsed.isEmpty() ? "В подписке нет поддерживаемых серверов" : "";
+                    uiMessage = parsed.isEmpty() ? "В подписке нет поддерживаемых серверов" : sourceError;
                     preferences.edit().putLong("last_sync", System.currentTimeMillis()).apply();
-                    pushSnapshot();
-                    fetchPublicIp(false);
+                    applyServers(parsed);
+                    fetchPublicIp(ShadowVpnService.connected);
                     if (preferences.getBoolean("ping_on_open", false)) runPings();
                 });
             } catch (Exception error) {
@@ -289,6 +326,19 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    /** A source that failed while others succeeded must not fail silently. */
+    private String firstSourceError(JSONArray sources) {
+        if (sources == null) return "";
+        for (int i = 0; i < sources.length(); i++) {
+            JSONObject source = sources.optJSONObject(i);
+            String error = source == null ? "" : source.optString("error", "");
+            if (!error.isEmpty()) {
+                return subscriptionSlotName(source.optInt("index", i)) + " не обновлена · " + error;
+            }
+        }
+        return "";
     }
 
     private String extractDoh(JSONObject root) {
@@ -315,7 +365,8 @@ public final class MainActivity extends Activity {
             int sourceIndex = source.optInt("index", i);
             String slotName = subscriptionSlotName(sourceIndex);
             String providerTitle = metadata.optString("title", "").trim();
-            String title = providerTitle.isEmpty() ? slotName
+            String title = sourceIndex == MANUAL_SOURCE ? slotName
+                    : providerTitle.isEmpty() ? slotName
                     : providerTitle.startsWith("Wi-Fi") || providerTitle.startsWith("LTE")
                     ? providerTitle : slotName + " · " + providerTitle;
             result.add(new SubscriptionInfo(
@@ -330,6 +381,7 @@ public final class MainActivity extends Activity {
     }
 
     private String subscriptionSlotName(int sourceIndex) {
+        if (sourceIndex == MANUAL_SOURCE) return "Свои конфигурации";
         boolean hasWifi = !preferences.getString("subscription_wifi", "").trim().isEmpty();
         if (hasWifi) return sourceIndex == 0 ? "Wi-Fi" : "LTE";
         return "LTE";
@@ -362,7 +414,7 @@ public final class MainActivity extends Activity {
     }
 
     private void runPings() {
-        if (pingRunning || servers.isEmpty() || ShadowVpnService.connected) return;
+        if (pingRunning || servers.isEmpty()) return;
         pingRunning = true;
         pingResults.clear();
         pushSnapshot();
@@ -414,42 +466,17 @@ public final class MainActivity extends Activity {
     private void startSelectedServer() {
         ServerItem selected = findSelected();
         if (selected == null) return;
-        String appRoutingMode = preferences.getString("app_routing_mode", "all");
-        String appPackages = preferences.getString("app_routing_packages", "[]");
-        if ("include".equals(appRoutingMode)) {
+        if ("include".equals(preferences.getString("app_routing_mode", "all"))) {
             try {
-                if (new JSONArray(appPackages).length() == 0) {
+                if (new JSONArray(preferences.getString("app_routing_packages", "[]")).length() == 0) {
                     uiMessage = "Выберите хотя бы одно приложение для VPN";
                     pushSnapshot();
                     return;
                 }
-            } catch (Exception error) {
-                appRoutingMode = "all";
-                appPackages = "[]";
-            }
+            } catch (Exception ignored) { }
         }
         try {
-            JSONObject options = new JSONObject();
-            String dnsId = preferences.getString("dns_provider",
-                    doh.isEmpty() ? "cloudflare" : "subscription-doh");
-            options.put("dnsId", dnsId);
-            options.put("dohUrl", "subscription-doh".equals(dnsId) ? doh : "");
-            options.put("fragmentation", preferences.getBoolean("fragmentation", false));
-            options.put("tunMtu", parseMtu(preferences.getString("tun_mtu", "1400")));
-            options.put("routingMode", preferences.getString("routing_mode", "full"));
-            options.put("pingMethod", preferences.getString("ping_method", "tcp"));
-            JSONArray rules = new JSONArray();
-            for (String line : preferences.getString("routing_rules", "").split("\\r?\\n")) {
-                if (!line.trim().isEmpty()) rules.put(line.trim());
-            }
-            options.put("routingRules", rules);
-            try {
-                options.put("autoProfileIds", new JSONArray(
-                        preferences.getString("auto_profiles", "[]")));
-            } catch (Exception ignored) {
-                options.put("autoProfileIds", new JSONArray());
-            }
-            Bridge.configure(options.toString());
+            CoreConfig.configure(this, preferences);
         } catch (Exception error) {
             uiMessage = cleanError(error);
             pushSnapshot();
@@ -460,16 +487,8 @@ public final class MainActivity extends Activity {
                         != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
         }
-        Intent intent = new Intent(this, ShadowVpnService.class)
-                .setAction(ShadowVpnService.START)
-                .putExtra("profileId", selected.id)
-                .putExtra("dnsDoh", "subscription-doh".equals(
-                        preferences.getString("dns_provider", "subscription-doh")) ? doh : "")
-                .putExtra("mtu", parseMtu(preferences.getString("tun_mtu", "1400")))
-                .putExtra("ipv6Enabled", preferences.getBoolean("ipv6_enabled", false))
-                .putExtra("appRoutingMode", appRoutingMode)
-                .putExtra("appPackages", appPackages);
-        startForegroundService(intent);
+        startForegroundService(new Intent(this, ShadowVpnService.class)
+                .setAction(ShadowVpnService.START));
         ShadowVpnService.status = "Подключение…";
         uiMessage = "";
         pushSnapshot();
@@ -508,36 +527,42 @@ public final class MainActivity extends Activity {
         if (ipRequestMode == mode) return;
         ipRequestMode = mode;
         worker.execute(() -> {
-            String[] endpoints = {"https://api4.ipify.org", "https://ipv4.icanhazip.com"};
-            for (String endpoint : endpoints) {
-                try {
-                    Proxy proxy = throughVpn
-                            ? new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", 18443))
-                            : Proxy.NO_PROXY;
-                    HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection(proxy);
-                    connection.setConnectTimeout(6000);
-                    connection.setReadTimeout(6000);
-                    connection.setRequestProperty("User-Agent", "ShadowVPN-Android/0.15");
-                    String value;
-                    try (BufferedReader reader = new BufferedReader(
-                            new InputStreamReader(connection.getInputStream()))) {
-                        value = reader.readLine();
-                    } finally {
-                        connection.disconnect();
-                    }
-                    if (value != null && value.trim().length() <= 64) {
-                        String ip = value.trim();
-                        ui.post(() -> {
-                            if (ipRequestMode == mode) {
-                                publicIp = ip;
-                                pushSnapshot();
-                            }
-                        });
-                        return;
-                    }
-                } catch (Exception ignored) { }
+            String ip = "";
+            if (throughVpn) {
+                try { ip = Bridge.publicIP(); } catch (Exception ignored) { }
+            } else {
+                ip = directPublicIp();
             }
+            final String result = ip;
+            if (result.isEmpty()) return;
+            ui.post(() -> {
+                if (ipRequestMode == mode) {
+                    publicIp = result;
+                    pushSnapshot();
+                }
+            });
         });
+    }
+
+    private String directPublicIp() {
+        for (String endpoint : new String[]{"https://api4.ipify.org", "https://ipv4.icanhazip.com"}) {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
+                connection.setConnectTimeout(6000);
+                connection.setReadTimeout(6000);
+                connection.setRequestProperty("User-Agent", "ShadowVPN-Android");
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(connection.getInputStream()))) {
+                    String value = reader.readLine();
+                    if (value != null && !value.trim().isEmpty() && value.trim().length() <= 64) {
+                        return value.trim();
+                    }
+                } finally {
+                    connection.disconnect();
+                }
+            } catch (Exception ignored) { }
+        }
+        return "";
     }
 
     private void updateTraffic() {
@@ -573,7 +598,7 @@ public final class MainActivity extends Activity {
     private JSONObject buildSnapshot() {
         JSONObject root = runtimeSnapshot();
         try {
-            root.put("needsSubscription", subscriptionUrls().length() == 0);
+            root.put("needsSubscription", !hasSources());
             root.put("importRunning", importRunning);
             root.put("pingRunning", pingRunning);
             JSONArray list = new JSONArray();
@@ -623,7 +648,10 @@ public final class MainActivity extends Activity {
         item.put("transport", server.transport.toUpperCase(Locale.ROOT));
         item.put("auto", server.auto);
         item.put("selected", server.id.equals(selectedId));
-        SubscriptionInfo source = findSubscriptionInfo(server.sourceIndex);
+        item.put("source", server.sourceIndex == MANUAL_SOURCE ? "manual"
+                : server.sourceIndex < 0 ? "" : subscriptionSlotName(server.sourceIndex));
+        SubscriptionInfo source = server.sourceIndex == MANUAL_SOURCE
+                ? null : findSubscriptionInfo(server.sourceIndex);
         if (source != null) {
             JSONObject subscription = new JSONObject();
             subscription.put("title", source.title);
@@ -654,6 +682,11 @@ public final class MainActivity extends Activity {
         value.put("fragmentation", preferences.getBoolean("fragmentation", false));
         value.put("tunMtu", preferences.getString("tun_mtu", "1400"));
         value.put("ipv6Enabled", preferences.getBoolean("ipv6_enabled", false));
+        value.put("lanDirect", preferences.getBoolean("lan_direct", true));
+        value.put("customDns", preferences.getString("custom_dns", ""));
+        value.put("subscriptionRules", preferences.getBoolean("subscription_rules", true));
+        value.put("geoipUrl", preferences.getString("geoip_url", ""));
+        value.put("geositeUrl", preferences.getString("geosite_url", ""));
         value.put("appRoutingMode", preferences.getString("app_routing_mode", "all"));
         value.put("appRoutingPackages", new JSONArray(
                 preferences.getString("app_routing_packages", "[]")));
@@ -662,6 +695,91 @@ public final class MainActivity extends Activity {
         value.put("hwid", deviceHwid);
         value.put("batteryUnrestricted", isBatteryUnrestricted());
         return value;
+    }
+
+    private static final String[] RUNTIME_KEYS = {
+            "dns_provider", "custom_dns", "fragmentation", "tun_mtu", "ipv6_enabled", "lan_direct",
+            "routing_mode", "routing_rules", "subscription_rules", "geoip_url", "geosite_url",
+            "app_routing_mode", "app_routing_packages", "auto_profiles"};
+
+    private String runtimeSignature() {
+        Map<String, ?> all = preferences.getAll();
+        StringBuilder signature = new StringBuilder();
+        for (String key : RUNTIME_KEYS) signature.append(key).append('=').append(all.get(key)).append('\n');
+        return signature.toString();
+    }
+
+    private void saveSettings(String json) {
+        Map<String, ?> previous = preferences.getAll();
+        String before = runtimeSignature();
+        try {
+            JSONObject value = new JSONObject(json);
+            SharedPreferences.Editor editor = preferences.edit();
+            editor.putString("auto_update", allowed(value.optString("autoUpdate"),
+                    new String[]{"15", "60", "360", "1440", "off"}, "1440"));
+            editor.putBoolean("ping_on_open", value.optBoolean("pingOnOpen", false));
+            editor.putString("dns_provider", allowed(value.optString("dnsProvider"),
+                    new String[]{"subscription-doh", "cloudflare", "google", "quad9", "custom"}, "cloudflare"));
+            editor.putString("custom_dns", value.optString("customDns", "").trim());
+            editor.putString("routing_mode", allowed(value.optString("routingMode"),
+                    new String[]{"full", "bypass", "proxy_only"}, "full"));
+            editor.putString("ping_method", allowed(value.optString("pingMethod"),
+                    new String[]{"tcp", "head", "get"}, "tcp"));
+            editor.putBoolean("fragmentation", value.optBoolean("fragmentation", false));
+            editor.putString("tun_mtu", allowed(value.optString("tunMtu"),
+                    new String[]{"1280", "1360", "1400", "1500"}, "1400"));
+            editor.putBoolean("ipv6_enabled", value.optBoolean("ipv6Enabled", false));
+            editor.putBoolean("lan_direct", value.optBoolean("lanDirect", true));
+            editor.putBoolean("subscription_rules", value.optBoolean("subscriptionRules", true));
+            editor.putString("geoip_url", value.optString("geoipUrl", "").trim());
+            editor.putString("geosite_url", value.optString("geositeUrl", "").trim());
+            editor.putString("app_routing_mode", allowed(value.optString("appRoutingMode"),
+                    new String[]{"all", "exclude", "include"}, "all"));
+            JSONArray appPackages = value.optJSONArray("appRoutingPackages");
+            if (appPackages != null) {
+                JSONArray cleanPackages = new JSONArray();
+                Set<String> seen = new HashSet<>();
+                for (int i = 0; i < appPackages.length() && cleanPackages.length() < 256; i++) {
+                    String packageName = appPackages.optString(i, "").trim();
+                    if (packageName.matches("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
+                            && !getPackageName().equals(packageName)
+                            && seen.add(packageName)) {
+                        cleanPackages.put(packageName);
+                    }
+                }
+                editor.putString("app_routing_packages", cleanPackages.toString());
+            }
+            editor.putString("routing_rules", value.optString("routingRules", "").trim());
+            JSONArray auto = value.optJSONArray("autoProfiles");
+            if (auto != null) editor.putString("auto_profiles", auto.toString());
+            editor.commit();
+            // The core is the single source of truth for what is valid.
+            CoreConfig.configure(this, preferences);
+        } catch (Exception error) {
+            restorePreferences(previous);
+            uiMessage = "Не сохранено · " + cleanError(error);
+            pushSnapshot();
+            return;
+        }
+        boolean reconnect = ShadowVpnService.connected && !before.equals(runtimeSignature());
+        uiMessage = reconnect ? "Настройки сохранены, переподключаемся" : "Настройки сохранены";
+        pushSnapshot();
+        if (reconnect) startSelectedServer();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void restorePreferences(Map<String, ?> values) {
+        SharedPreferences.Editor editor = preferences.edit().clear();
+        for (Map.Entry<String, ?> entry : values.entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof String) editor.putString(entry.getKey(), (String) value);
+            else if (value instanceof Boolean) editor.putBoolean(entry.getKey(), (Boolean) value);
+            else if (value instanceof Long) editor.putLong(entry.getKey(), (Long) value);
+            else if (value instanceof Integer) editor.putInt(entry.getKey(), (Integer) value);
+            else if (value instanceof Float) editor.putFloat(entry.getKey(), (Float) value);
+            else if (value instanceof Set) editor.putStringSet(entry.getKey(), (Set<String>) value);
+        }
+        editor.commit();
     }
 
     private SubscriptionInfo findSubscriptionInfo(int sourceIndex) {
@@ -706,6 +824,10 @@ public final class MainActivity extends Activity {
                     JSONObject input = new JSONObject(json);
                     String rawWifi = input.optString("wifi", "").trim();
                     String rawLte = input.optString("lte", "").trim();
+                    String manual = input.optString("manual", "").trim();
+                    if (manual.length() > 1024 * 1024) {
+                        throw new IllegalArgumentException("Свои конфигурации больше 1 МБ");
+                    }
                     String wifi = cleanSubscriptionUrl(rawWifi);
                     String lte = cleanSubscriptionUrl(rawLte);
                     if ((!rawWifi.isEmpty() && wifi.isEmpty()) || (!rawLte.isEmpty() && lte.isEmpty())) {
@@ -715,7 +837,8 @@ public final class MainActivity extends Activity {
                         throw new IllegalArgumentException("Для Wi-Fi и LTE нужны разные ссылки");
                     }
                     saveSubscriptionSlots(wifi, lte);
-                    if (wifi.isEmpty() && lte.isEmpty()) {
+                    preferences.edit().putString("manual_configs", manual).apply();
+                    if (!hasSources()) {
                         servers.clear();
                         subscriptionInfo.clear();
                         selectedId = "";
@@ -735,53 +858,15 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void saveSettings(String json) {
-            ui.post(() -> {
-                try {
-                    JSONObject value = new JSONObject(json);
-                    SharedPreferences.Editor editor = preferences.edit();
-                    editor.putString("auto_update", allowed(value.optString("autoUpdate"),
-                            new String[]{"15", "60", "360", "1440", "off"}, "1440"));
-                    editor.putBoolean("ping_on_open", value.optBoolean("pingOnOpen", false));
-                    editor.putString("dns_provider", allowed(value.optString("dnsProvider"),
-                            new String[]{"subscription-doh", "cloudflare", "google", "quad9"}, "cloudflare"));
-                    editor.putString("routing_mode", allowed(value.optString("routingMode"),
-                            new String[]{"full", "bypass", "proxy_only"}, "full"));
-                    editor.putString("ping_method", allowed(value.optString("pingMethod"),
-                            new String[]{"tcp", "head", "get"}, "tcp"));
-                    editor.putBoolean("fragmentation", value.optBoolean("fragmentation", false));
-                    editor.putString("tun_mtu", allowed(value.optString("tunMtu"),
-                            new String[]{"1280", "1360", "1400", "1500"}, "1400"));
-                    editor.putBoolean("ipv6_enabled", value.optBoolean("ipv6Enabled", false));
-                    editor.putString("app_routing_mode", allowed(value.optString("appRoutingMode"),
-                            new String[]{"all", "exclude", "include"}, "all"));
-                    JSONArray appPackages = value.optJSONArray("appRoutingPackages");
-                    if (appPackages != null) {
-                        JSONArray cleanPackages = new JSONArray();
-                        Set<String> seen = new HashSet<>();
-                        for (int i = 0; i < appPackages.length() && cleanPackages.length() < 256; i++) {
-                            String packageName = appPackages.optString(i, "").trim();
-                            if (packageName.matches("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
-                                    && !getPackageName().equals(packageName)
-                                    && seen.add(packageName)) {
-                                cleanPackages.put(packageName);
-                            }
-                        }
-                        editor.putString("app_routing_packages", cleanPackages.toString());
-                    }
-                    editor.putString("routing_rules", value.optString("routingRules", "").trim());
-                    JSONArray auto = value.optJSONArray("autoProfiles");
-                    if (auto != null) editor.putString("auto_profiles", auto.toString());
-                    editor.apply();
-                    uiMessage = "Настройки сохранены";
-                    pushSnapshot();
-                } catch (Exception error) {
-                    uiMessage = "Не удалось сохранить настройки";
-                    pushSnapshot();
-                }
-            });
+            ui.post(() -> saveSettings(json));
         }
 
-        @JavascriptInterface public String getLogs() { return ShadowVpnService.getLogs(); }
+        @JavascriptInterface public String getLogs() {
+            String core = "";
+            try { core = Bridge.logs(); } catch (Exception ignored) { }
+            String app = ShadowVpnService.getLogs();
+            return core.trim().isEmpty() ? app : app + "\n— Xray —\n" + core;
+        }
 
         @JavascriptInterface public void copyText(String value) {
             ui.post(() -> {
@@ -939,6 +1024,7 @@ public final class MainActivity extends Activity {
         try {
             result.put("wifi", preferences.getString("subscription_wifi", ""));
             result.put("lte", preferences.getString("subscription_lte", ""));
+            result.put("manual", preferences.getString("manual_configs", ""));
         } catch (Exception ignored) { }
         return result;
     }
@@ -991,15 +1077,6 @@ public final class MainActivity extends Activity {
     private static String allowed(String value, String[] values, String fallback) {
         for (String candidate : values) if (candidate.equals(value)) return candidate;
         return fallback;
-    }
-
-    private static int parseMtu(String value) {
-        try {
-            int mtu = Integer.parseInt(value);
-            return Math.max(1280, Math.min(1500, mtu));
-        } catch (Exception ignored) {
-            return 1400;
-        }
     }
 
     private long safeTraffic(long value) {
