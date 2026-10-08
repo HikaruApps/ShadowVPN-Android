@@ -39,14 +39,14 @@ jobs:
           else
             echo "::warning::SIGNING_KEYSTORE_BASE64 is not set; the APK is signed with a one-off debug key"
           fi
-      - run: chmod +x gradlew && ./gradlew :app:assembleDebug
+      - run: chmod +x gradlew && ./gradlew :app:assembleRelease
         env:
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
-          name: ShadowVPN-Android-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ShadowVPN-Android
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 7

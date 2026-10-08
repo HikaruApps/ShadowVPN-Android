@@ -1,7 +1,6 @@
 package net.shadownet.shadowvpn.android;
 
 import android.Manifest;
-import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -930,16 +929,17 @@ public final class MainActivity extends Activity {
             });
         }
 
-        @SuppressLint("BatteryLife")
+        // Opens the app's system page (Battery → Unrestricted is one tap away)
+        // instead of asking for REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, which
+        // Play Protect treats as a warning sign.
         @JavascriptInterface public void openBatterySettings() {
             ui.post(() -> {
                 try {
-                    startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                             Uri.parse("package:" + getPackageName())));
                 } catch (Exception firstError) {
                     try {
-                        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.parse("package:" + getPackageName())));
+                        startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
                     } catch (Exception ignored) { }
                 }
             });

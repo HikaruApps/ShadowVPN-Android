@@ -16,8 +16,8 @@ and APK files are intentionally not committed.
 ## Build without Android Studio
 
 In GitHub, open **Actions → Android build → Run workflow**. After a successful
-run, download the `ShadowVPN-Android-debug` artifact and unzip it to get
-`app-debug.apk`. No local Android SDK is needed for this route.
+run, download the `ShadowVPN-Android` artifact and unzip it to get
+`app-release.apk`. No local Android SDK is needed for this route.
 
 ## Build
 
