@@ -40,6 +40,11 @@
   let splitAppsReceiver = null;
   let appIconObserver = null;
   let refreshBattery = null;
+  // A drag that ends over a button must not also press it.
+  let suppressClickUntil = 0;
+  document.addEventListener("click", event => {
+    if (performance.now() < suppressClickUntil) { event.preventDefault(); event.stopPropagation(); }
+  }, true);
 
   const ICONS = {
     auto: '<path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/>',
@@ -397,6 +402,7 @@
     sheetOpen = true;
     closeMenu();
     serverScrim.hidden = false;
+    serverScrim.classList.remove("closing");
     serverSheet.setAttribute("aria-hidden", "false");
     renderServers(true);
     requestAnimationFrame(() => serverSheet.classList.add("open"));
@@ -409,6 +415,7 @@
     serverSheet.classList.remove("dragging", "open");
     serverSheet.style.removeProperty("--drag-y");
     serverScrim.style.opacity = "0";
+    serverScrim.classList.add("closing");
     serverSheet.setAttribute("aria-hidden", "true");
     setTimeout(() => {
       if (sheetOpen) return;
@@ -433,7 +440,7 @@
     });
   }
 
-  function bindDrag(target, handles, scroller, onMove, onEnd, canStart = () => true) {
+  function bindDrag(target, handles, scroller, onMove, onEnd, canStart = () => true, canPull = () => true) {
     let startY = 0;
     let startAt = 0;
     let dragging = false;
@@ -460,31 +467,55 @@
       element.addEventListener("pointercancel", end);
     });
 
-    // Pulling a list down from its top edge drags the whole sheet.
+    // Pulling a list down from its top edge drags the whole sheet, wherever
+    // the finger lands (cards and rows are buttons too). The gesture only
+    // becomes a drag once it is clearly downward, so taps stay taps.
+    const SLOP = 8;
+    let startX = 0;
     let listStart = 0;
+    let armed = false;
     let pulling = false;
     scroller.addEventListener("touchstart", event => {
-      listStart = event.touches[0].clientY;
-      pulling = scroller.scrollTop <= 0 && canStart(event);
-      startAt = performance.now();
+      const touch = event.touches[0];
+      startX = touch.clientX;
+      listStart = touch.clientY;
+      pulling = false;
+      armed = event.touches.length === 1 && scroller.scrollTop <= 0
+        && canPull() && !event.target.closest?.("input,textarea,select");
     }, { passive: true });
     scroller.addEventListener("touchmove", event => {
-      if (!pulling) return;
-      const distance = event.touches[0].clientY - listStart;
-      if (distance <= 4) return;
+      if (!armed && !pulling) return;
+      const touch = event.touches[0];
+      const dy = touch.clientY - listStart;
+      if (!pulling) {
+        const dx = touch.clientX - startX;
+        if (Math.abs(dy) < SLOP && Math.abs(dx) < SLOP) return;
+        armed = false;
+        // Upward or sideways: let the list scroll normally.
+        if (dy <= 0 || Math.abs(dx) > Math.abs(dy) || scroller.scrollTop > 0) return;
+        pulling = true;
+        listStart = touch.clientY;
+        startAt = performance.now();
+        target.classList.add("dragging");
+      }
       event.preventDefault();
-      target.classList.add("dragging");
-      onMove(distance);
+      onMove(Math.max(0, touch.clientY - listStart));
     }, { passive: false });
     const finish = event => {
+      armed = false;
       if (!pulling) return;
       pulling = false;
+      suppressClickUntil = performance.now() + 400;
       target.classList.remove("dragging");
-      const distance = Math.max(0, ((event.changedTouches && event.changedTouches[0]?.clientY) || listStart) - listStart);
+      const y = (event.changedTouches && event.changedTouches[0]?.clientY) || listStart;
+      const distance = Math.max(0, y - listStart);
       onEnd(distance, distance / Math.max(1, performance.now() - startAt));
     };
     scroller.addEventListener("touchend", finish);
-    scroller.addEventListener("touchcancel", () => { if (pulling) { pulling = false; target.classList.remove("dragging"); onEnd(0, 0); } });
+    scroller.addEventListener("touchcancel", event => {
+      if (pulling) { pulling = false; target.classList.remove("dragging"); onEnd(0, 0); }
+      armed = false;
+    });
   }
 
   function bindSheetDrag() {
@@ -497,7 +528,8 @@
         if (distance > 100 || velocity > .65) closeServers();
         else { serverSheet.style.removeProperty("--drag-y"); serverScrim.style.opacity = ""; }
       },
-      event => !event.target.closest?.("button"));
+      event => !event.target.closest?.("button"),
+      () => sheetOpen);
   }
 
   /* ---------- Panels ---------- */
@@ -509,6 +541,7 @@
     panel.classList.remove("dragging", "closing");
     panel.style.removeProperty("--panel-drag-y");
     panelOverlay.style.opacity = "";
+    panelOverlay.classList.remove("closing");
     panelOverlay.hidden = false;
     if (name === "settings") buildSettings();
     if (name === "subscriptions") buildSubscriptions();
@@ -531,6 +564,7 @@
     panel.classList.add("closing");
     panel.style.removeProperty("--panel-drag-y");
     panelOverlay.style.opacity = "0";
+    panelOverlay.classList.add("closing");
     clearTimeout(panelCloseTimer);
     panelCloseTimer = setTimeout(() => {
       panelOverlay.hidden = true;
@@ -552,7 +586,8 @@
         else { panel.style.removeProperty("--panel-drag-y"); panelOverlay.style.opacity = ""; }
       },
       event => !panelOverlay.hidden && !panel.classList.contains("closing")
-        && !event.target.closest?.("button,input,select,textarea,label"));
+        && !event.target.closest?.("button,input,select,textarea,label"),
+      () => !panelOverlay.hidden && !panel.classList.contains("closing"));
   }
 
   // Resets the panel for a new page and returns its emptied body.
