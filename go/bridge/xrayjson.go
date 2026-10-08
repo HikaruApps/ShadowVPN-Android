@@ -257,6 +257,7 @@ func profileFromOutbound(name string, outbound map[string]any, byTag map[string]
 		clean["streamSettings"] = stream
 	}
 	profile := newProfile(name, clean)
+	profile.Format = "json"
 	if protocol == "wireguard" {
 		profile.Transport = "udp"
 	}

@@ -26,6 +26,8 @@ type Profile struct {
 	Transport   string `json:"transport"`
 	Auto        bool   `json:"auto,omitempty"`
 	SourceIndex int    `json:"sourceIndex"`
+	// Format is "json" for servers imported from Xray JSON.
+	Format string `json:"format,omitempty"`
 	// Connection details stay private to Go. Besides keeping credentials out of
 	// the generated Java API, this is required by gomobile: arbitrary Go maps
 	// are not supported in exported structs.

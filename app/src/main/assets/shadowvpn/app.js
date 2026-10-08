@@ -106,6 +106,16 @@
     return [server.protocol, server.transport].filter(Boolean).join(" · ");
   }
 
+  // "JSON" badge left of protocol · transport for servers imported from Xray JSON.
+  function fillMeta(node, server) {
+    const key = `${server?.format || ""}|${meta(server)}`;
+    if (node.dataset.key === key) return;
+    node.dataset.key = key;
+    node.replaceChildren();
+    if (server?.format === "json") node.append(el("span", "badge", "JSON"));
+    node.append(meta(server));
+  }
+
   function latencyText(server) {
     if (snapshot.pingRunning && server.latency == null) return { text: "•••", cls: "pending" };
     if (server.latency == null) return { text: "", cls: "" };
@@ -213,7 +223,9 @@
   function serverCard(server) {
     const card = el("button", `server-card${server.selected ? " selected" : ""}`);
     const copy = el("span", "server-copy");
-    copy.append(el("b", null, server.name), el("small", null, meta(server)));
+    const details = el("small");
+    fillMeta(details, server);
+    copy.append(el("b", null, server.name), details);
     const info = latencyText(server);
     card.append(flag(server), copy, el("span", `latency ${info.cls}`, info.text));
     card.addEventListener("click", () => {
@@ -334,7 +346,7 @@
       $("dockFlag").replaceWith(nextFlag);
     }
     setText("dockName", selected?.name || "Выберите сервер");
-    setText("dockMeta", meta(selected));
+    fillMeta($("dockMeta"), selected);
     const ping = selected ? latencyText(selected) : { text: "", cls: "" };
     setText("dockPing", ping.text);
     $("dockPing").className = `latency ${ping.cls}`;
@@ -1024,7 +1036,7 @@
   const mockServers = [{id:"auto",name:"Авто",countryCode:"",protocol:"AUTO",transport:"",auto:true,selected:false,latency:43,available:true}];
   for (let i = 0; i < 120; i++) {
     const code = countries[i % countries.length];
-    mockServers.push({id:`s${i}`,source:i % 5 === 0 ? "LTE" : "Wi-Fi",name:`${code.toUpperCase()} ${i + 1} | ${["Hysteria","Torrent","Gemini | gRPC","WARP"][i % 4]}`,countryCode:code,protocol:"VLESS",transport:["TCP","GRPC","WS"][i % 3],auto:false,selected:i === 0,latency:i % 7 === 6 ? 0 : 40 + (i * 37) % 500,available:i % 7 !== 6});
+    mockServers.push({id:`s${i}`,source:i % 5 === 0 ? "LTE" : "Wi-Fi",name:`${code.toUpperCase()} ${i + 1} | ${["Hysteria","Torrent","Gemini | gRPC","WARP"][i % 4]}`,countryCode:code,protocol:"VLESS",transport:["TCP","GRPC","WS"][i % 3],format:i % 3 === 0 ? "json" : "",auto:false,selected:i === 0,latency:i % 7 === 6 ? 0 : 40 + (i * 37) % 500,available:i % 7 !== 6});
   }
   const mockApps = Array.from({length: 180}, (_, i) => ({name:`Приложение ${i + 1}`,packageName:`com.example.app${i + 1}`}));
   native.getInstalledApps = () => JSON.stringify({apps: mockApps});

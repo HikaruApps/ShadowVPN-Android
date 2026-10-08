@@ -110,6 +110,7 @@ img{display:block}
 .server-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
 .server-copy b{overflow:hidden;font-size:14px;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
 .server-copy small{overflow:hidden;color:var(--text-3);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.server-copy small .badge{display:inline-block;margin-right:6px;padding:0 5px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text-2);font-size:10px;font-weight:600;line-height:15px;letter-spacing:.02em;vertical-align:1px}
 .latency{flex:0 0 auto;min-width:48px;color:var(--text-3);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
 .latency.good{color:var(--success)}
 .latency.medium{color:var(--warning)}

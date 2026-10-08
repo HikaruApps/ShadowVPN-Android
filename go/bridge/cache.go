@@ -20,6 +20,7 @@ const profileCacheFile = "profiles.json"
 type cachedProfile struct {
 	Name           string           `json:"name"`
 	Transport      string           `json:"transport"`
+	Format         string           `json:"format,omitempty"`
 	SourceIndex    int              `json:"sourceIndex"`
 	Outbound       map[string]any   `json:"outbound"`
 	Chain          []map[string]any `json:"chain,omitempty"`
@@ -55,7 +56,7 @@ func saveProfileCache(directory string, profiles []Profile) error {
 	cached := make([]cachedProfile, 0, len(profiles))
 	for _, profile := range profiles {
 		cached = append(cached, cachedProfile{
-			Name: profile.Name, Transport: profile.Transport, SourceIndex: profile.SourceIndex,
+			Name: profile.Name, Transport: profile.Transport, Format: profile.Format, SourceIndex: profile.SourceIndex,
 			Outbound: profile.outbound, Chain: profile.chain,
 			Rules: profile.rules, DomainStrategy: profile.domainStrategy,
 		})
@@ -92,6 +93,7 @@ func loadProfileCache(directory string) ([]Profile, error) {
 			profile.Transport = item.Transport
 		}
 		profile.SourceIndex = item.SourceIndex
+		profile.Format = item.Format
 		profile.chain = item.Chain
 		profile.rules = item.Rules
 		profile.domainStrategy = item.DomainStrategy

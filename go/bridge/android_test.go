@@ -55,6 +55,9 @@ func TestXrayJSONImportsServerChainAndRules(t *testing.T) {
 		t.Fatalf("expected one server, got %d", len(profiles))
 	}
 	profile := profiles[0]
+	if profile.Format != "json" {
+		t.Fatalf("JSON server not marked: %q", profile.Format)
+	}
 	if profile.Name != "🇩🇪 Germany" || profile.address != "de.example.com" || profile.port != 443 {
 		t.Fatalf("flat VLESS endpoint was not imported: %q %s:%d", profile.Name, profile.address, profile.port)
 	}
@@ -159,6 +162,9 @@ func TestShareLinksVMessShadowsocksAndBrokenLines(t *testing.T) {
 		t.Fatalf("expected 5 servers and 2 skipped lines, got %d and %d", len(profiles), skipped)
 	}
 	vm := profiles[0]
+	if vm.Format != "" {
+		t.Fatal("share links must not be marked as JSON")
+	}
 	stream := vm.outbound["streamSettings"].(map[string]any)
 	if vm.Name != "VM" || vm.Transport != "ws" || stream["security"] != "tls" ||
 		stream["tlsSettings"].(map[string]any)["serverName"] != "cdn.example" {
@@ -333,7 +339,7 @@ func TestProfileCacheRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded) != 1 || loaded[0].ID != profiles[0].ID || loaded[0].SourceIndex != manualSourceIndex ||
+	if len(loaded) != 1 || loaded[0].ID != profiles[0].ID || loaded[0].SourceIndex != manualSourceIndex || loaded[0].Format != "json" ||
 		len(loaded[0].chain) != 1 || len(loaded[0].rules) != 4 || loaded[0].address != "de.example.com" {
 		t.Fatalf("cache lost data: %#v", loaded)
 	}
