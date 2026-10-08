@@ -29,7 +29,9 @@ cd go && go test ./bridge -run TestParseNaiveHTTPSURI   # single test
   into a temp dir and binds there. `-ldflags=-checklinkname=0` is required (Xray's
   transitive dep `github.com/wlynxg/anet`).
 - CI (`.github/workflows/android.yml`) runs bridge build → `go test ./...` →
-  `assembleDebug` on every push/PR and uploads `ShadowVPN-Android-debug`.
+  `assembleRelease` on every push/PR and uploads `ShadowVPN-Android` (`app-release.apk`).
+  Release is signed with the key from the `SIGNING_*` secrets (falls back to the debug
+  key without them), so updates install over each other and the HWID stays stable.
 - Version bumps: `versionCode`/`versionName` in `app/build.gradle`.
 
 ## Architecture

@@ -27,10 +27,26 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: bash build-bridge.sh
       - run: cd go && go test ./...
-      - run: chmod +x gradlew && ./gradlew :app:assembleDebug
+      - name: Restore signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          # Without the secret (forks, first setup) Gradle falls back to a
+          # throwaway debug key, and the APK will not install over older builds.
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing.jks"
+            echo "SIGNING_KEYSTORE_PATH=$RUNNER_TEMP/signing.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::SIGNING_KEYSTORE_BASE64 is not set; the APK is signed with a one-off debug key"
+          fi
+      - run: chmod +x gradlew && ./gradlew :app:assembleRelease
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
-          name: ShadowVPN-Android-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ShadowVPN-Android
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 7

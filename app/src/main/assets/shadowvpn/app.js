@@ -39,6 +39,7 @@
   let panelPager = null;
   let splitAppsReceiver = null;
   let appIconObserver = null;
+  let refreshBattery = null;
 
   const ICONS = {
     auto: '<path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/>',
@@ -354,6 +355,7 @@
     $("pingButton").disabled = !!snapshot.pingRunning;
     $("refreshButton").disabled = !!snapshot.importRunning;
     renderServers();
+    refreshBattery?.(!!snapshot.settings?.batteryUnrestricted);
 
     $("welcome").hidden = !snapshot.needsSubscription;
     if (snapshot.message && snapshot.message !== lastMessage) showToast(snapshot.message);
@@ -515,6 +517,7 @@
     splitAppsReceiver = null;
     panelPager?.disconnect();
     panelPager = null;
+    refreshBattery = null;
     if (appIconObserver) { appIconObserver.disconnect(); appIconObserver = null; }
   }
 
@@ -889,9 +892,19 @@
   function buildApplicationSettings() {
     const body = page("Приложение", buildSettings);
     const s = snapshot.settings || {};
-    body.append(group("Фоновая работа",
-      row("Батарея", s.batteryUnrestricted ? "Работа в фоне не ограничена" : "Снимите ограничения для стабильного VPN",
-        button(s.batteryUnrestricted ? "Открыть" : "Настроить", "secondary", () => native.openBatterySettings(), true))));
+    const battery = row("Работа в фоне", null,
+      button("", "secondary", () => native.openBatterySettings(), true));
+    const hint = el("small");
+    battery.querySelector(".row-copy").append(hint);
+    // Android reports the new state when the user comes back from settings.
+    refreshBattery = unrestricted => {
+      hint.textContent = unrestricted
+        ? "Ограничений нет, VPN не отключится в фоне"
+        : "Откроются настройки приложения: Батарея → Без ограничений";
+      battery.querySelector("button").textContent = unrestricted ? "Открыть" : "Настроить";
+    };
+    refreshBattery(!!s.batteryUnrestricted);
+    body.append(group("Фоновая работа", battery));
     const autoUpdate = selectControl([["15","Каждые 15 минут"],["60","Каждый час"],["360","Каждые 6 часов"],["1440","Раз в сутки"],["off","Выключено"]], s.autoUpdate);
     body.append(group("Подписка", row("Автообновление", "Не прерывает активное подключение", autoUpdate)));
     body.append(saveActions(() => ({ autoUpdate: autoUpdate.value })));

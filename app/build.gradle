@@ -1,5 +1,11 @@
 plugins { id 'com.android.application' }
 
+// CI stamps the commit into the version so the About screen shows which build
+// is installed. A stable signing key from CI secrets keeps updates installable
+// over each other and keeps ANDROID_ID (and with it the HWID) unchanged.
+def buildSha = System.getenv('GITHUB_SHA')
+def signingKeystore = System.getenv('SIGNING_KEYSTORE_PATH')
+
 android {
     namespace = 'net.shadownet.shadowvpn.android'
     compileSdk = 35
@@ -7,8 +13,28 @@ android {
         applicationId = 'net.shadownet.shadowvpn.android'
         minSdk = 29
         targetSdk = 35
-        versionCode = 18
-        versionName = '0.16.0'
+        versionCode = 19
+        versionName = '0.17.0' + (buildSha ? '-' + buildSha.take(7) : '')
+    }
+    if (signingKeystore) {
+        signingConfigs {
+            stable {
+                storeFile = file(signingKeystore)
+                storePassword = System.getenv('SIGNING_STORE_PASSWORD')
+                keyAlias = System.getenv('SIGNING_KEY_ALIAS')
+                keyPassword = System.getenv('SIGNING_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        debug {
+            if (signingKeystore) signingConfig = signingConfigs.stable
+        }
+        // Without the CI key (forks, local builds) release falls back to the
+        // debug key so the APK still installs.
+        release {
+            signingConfig = signingKeystore ? signingConfigs.stable : signingConfigs.debug
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
