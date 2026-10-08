@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,8 +112,30 @@ func TestXrayJSONBalancerImportsEveryMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(profiles) != 2 || profiles[0].Name != "Auto · auto-1" || profiles[1].address != "b.example" {
-		t.Fatalf("balancer members were not imported: %#v", profiles)
+	// Like v2rayNG, a balancer config is one profile; its servers are members.
+	if len(profiles) != 1 || profiles[0].Name != "Auto" || profiles[0].Members != 2 || profiles[0].Protocol != "balancer" {
+		t.Fatalf("balancer config must import as one group: %#v", profiles)
+	}
+	group := profiles[0]
+	if group.members[1].address != "b.example" || group.Format != "json" {
+		t.Fatalf("group members lost: %#v", group.members)
+	}
+
+	directory := t.TempDir()
+	group.SourceIndex = 1
+	if err := saveProfileCache(directory, []Profile{group}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadProfileCache(directory)
+	if err != nil || len(loaded) != 1 || loaded[0].ID != group.ID || len(loaded[0].members) != 2 || loaded[0].SourceIndex != 1 {
+		t.Fatalf("group did not survive the cache: %#v %v", loaded, err)
+	}
+
+	// Choosing the group for Auto selects its servers, with the group's source.
+	candidates := autoCandidates([]Profile{group, {ID: "other", Name: "Other"}},
+		mobileOptions{AutoProfileIDs: []string{group.ID}, PreferredSource: 1}, autoProfileID)
+	if len(candidates) != 2 || candidates[0].ID != group.members[0].ID || candidates[0].SourceIndex != 1 {
+		t.Fatalf("Auto did not expand the group: %#v", candidates)
 	}
 	// Chaining through another server is rejected rather than silently skipped.
 	if _, err := profileFromOutbound("x", map[string]any{"protocol": "vless", "settings": map[string]any{"address": "c", "port": 1, "id": "z"},
@@ -565,4 +589,47 @@ func TestSubscriptionGeoRulesDoNotBlockConnecting(t *testing.T) {
 	if _, err := androidRuntimeConfig(config, androidRuntimeOptions{DNS: dnsPresets["cloudflare"], RoutingMode: "bypass", GeoData: failing}); err == nil {
 		t.Fatal("user geo rules without GeoData must fail")
 	}
+}
+
+func TestPingGroupTakesFastestMember(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	port := listener.Addr().(*net.TCPAddr).Port
+	up := mustProfile(t, fmt.Sprintf("trojan://p@127.0.0.1:%d?security=tls#up", port))
+	down := mustProfile(t, "trojan://p@127.0.0.1:1?security=tls#down")
+	group := newGroupProfile("Balancer", []Profile{up, down})
+
+	mobile.Lock()
+	previous := mobile.profiles
+	mobile.profiles = []Profile{group}
+	mobile.Unlock()
+	defer func() { mobile.Lock(); mobile.profiles = previous; mobile.Unlock() }()
+
+	encoded, err := PingProfiles("tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []PingResult
+	_ = json.Unmarshal([]byte(encoded), &results)
+	for _, result := range results {
+		if result.ID == group.ID {
+			if !result.Available || result.LatencyMS < 1 {
+				t.Fatalf("group must take its reachable member's latency: %#v", result)
+			}
+			return
+		}
+	}
+	t.Fatalf("no result for the group: %s", encoded)
 }

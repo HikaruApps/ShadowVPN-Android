@@ -190,7 +190,20 @@ func PingProfiles(method string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	result, err := json.Marshal(pingProfilesWithAutoMethod(ctx, profiles, method))
+	flat, _ := flattenGroups(profiles)
+	results := pingProfilesWithAutoMethod(ctx, flat, method)
+	// A balancer is as fast as its fastest reachable server.
+	for _, profile := range profiles {
+		if len(profile.members) == 0 {
+			continue
+		}
+		group := PingResult{ID: profile.ID}
+		if _, best, ok := fastestProfile(profile.members, results); ok {
+			group.Available, group.LatencyMS = true, best.LatencyMS
+		}
+		results = append(results, group)
+	}
+	result, err := json.Marshal(results)
 	return string(result), err
 }
 
@@ -362,10 +375,11 @@ func Prepare(profileID string) error {
 		},
 	}
 
-	if isAutoProfileID(profileID) {
-		candidates := autoCandidates(mobile.profiles, options, profileID)
+	// Auto and balancer configs from Xray JSON both run Xray's leastPing
+	// balancer over a set of servers, fastest first.
+	balance := func(candidates []Profile, empty string) error {
 		if len(candidates) == 0 {
-			return errors.New("Для Auto нет подходящих серверов")
+			return errors.New(empty)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -383,6 +397,9 @@ func Prepare(profileID string) error {
 		mobile.prepared, err = androidRuntimeConfig(config, runtime)
 		return err
 	}
+	if isAutoProfileID(profileID) {
+		return balance(autoCandidates(mobile.profiles, options, profileID), "Для Auto нет подходящих серверов")
+	}
 
 	var chosen *Profile
 	for i := range mobile.profiles {
@@ -393,6 +410,9 @@ func Prepare(profileID string) error {
 	}
 	if chosen == nil {
 		return errors.New("Сервер отсутствует в подписке. Обновите её")
+	}
+	if len(chosen.members) > 0 {
+		return balance(profilesWithoutProtocol(chosen.members, "naive"), "В балансировщике нет подходящих серверов")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -429,7 +449,8 @@ func Prepare(profileID string) error {
 // subscription. Stale selections (servers that left the subscription) and an
 // empty network-specific list fall back to the wider set instead of failing.
 func autoCandidates(profiles []Profile, options mobileOptions, profileID string) []Profile {
-	candidates := profilesWithoutProtocol(profiles, "naive")
+	flat, groupOf := flattenGroups(profiles)
+	candidates := profilesWithoutProtocol(flat, "naive")
 	if len(options.AutoProfileIDs) > 0 {
 		allowed := make(map[string]struct{}, len(options.AutoProfileIDs))
 		for _, id := range options.AutoProfileIDs {
@@ -437,7 +458,9 @@ func autoCandidates(profiles []Profile, options mobileOptions, profileID string)
 		}
 		filtered := make([]Profile, 0, len(candidates))
 		for _, profile := range candidates {
-			if _, ok := allowed[profile.ID]; ok {
+			_, direct := allowed[profile.ID]
+			_, viaGroup := allowed[groupOf[profile.ID]]
+			if direct || viaGroup {
 				filtered = append(filtered, profile)
 			}
 		}

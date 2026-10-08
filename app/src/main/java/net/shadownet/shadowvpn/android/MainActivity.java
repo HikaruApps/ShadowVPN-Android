@@ -264,7 +264,8 @@ public final class MainActivity extends Activity {
                     profile.optString("transport", "tcp"),
                     profile.optBoolean("auto", false),
                     profile.optInt("sourceIndex", -1),
-                    profile.optString("format", "")));
+                    profile.optString("format", ""),
+                    profile.optInt("members", 0)));
         }
         return parsed;
     }
@@ -647,6 +648,7 @@ public final class MainActivity extends Activity {
         item.put("protocol", server.protocol.toUpperCase(Locale.ROOT));
         item.put("transport", server.transport.toUpperCase(Locale.ROOT));
         item.put("format", server.format);
+        item.put("members", server.members);
         item.put("auto", server.auto);
         item.put("selected", server.id.equals(selectedId));
         item.put("source", server.sourceIndex == MANUAL_SOURCE ? "manual"
@@ -1121,9 +1123,10 @@ public final class MainActivity extends Activity {
         final boolean auto;
         final int sourceIndex;
         final String format;
+        final int members;
 
         ServerItem(String id, String name, String protocol, String transport, boolean auto,
-                   int sourceIndex, String format) {
+                   int sourceIndex, String format, int members) {
             this.id = id;
             this.name = name;
             this.protocol = protocol;
@@ -1131,6 +1134,7 @@ public final class MainActivity extends Activity {
             this.auto = auto;
             this.sourceIndex = sourceIndex;
             this.format = format;
+            this.members = members;
         }
     }
 
