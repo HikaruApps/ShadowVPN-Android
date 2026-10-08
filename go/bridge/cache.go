@@ -26,6 +26,51 @@ type cachedProfile struct {
 	Chain          []map[string]any `json:"chain,omitempty"`
 	Rules          []map[string]any `json:"rules,omitempty"`
 	DomainStrategy string           `json:"domainStrategy,omitempty"`
+	Members        []cachedProfile  `json:"members,omitempty"`
+}
+
+func toCached(profile Profile) cachedProfile {
+	cached := cachedProfile{
+		Name: profile.Name, Transport: profile.Transport, Format: profile.Format, SourceIndex: profile.SourceIndex,
+		Outbound: profile.outbound, Chain: profile.chain,
+		Rules: profile.rules, DomainStrategy: profile.domainStrategy,
+	}
+	for _, member := range profile.members {
+		cached.Members = append(cached.Members, toCached(member))
+	}
+	return cached
+}
+
+func fromCached(item cachedProfile) (Profile, bool) {
+	if len(item.Members) > 0 {
+		members := make([]Profile, 0, len(item.Members))
+		for _, cachedMember := range item.Members {
+			if member, ok := fromCached(cachedMember); ok {
+				members = append(members, member)
+			}
+		}
+		if len(members) == 0 {
+			return Profile{}, false
+		}
+		group := newGroupProfile(item.Name, members)
+		group.SourceIndex = item.SourceIndex
+		group.rules = item.Rules
+		group.domainStrategy = item.DomainStrategy
+		return group, true
+	}
+	if item.Outbound == nil {
+		return Profile{}, false
+	}
+	profile := newProfile(item.Name, item.Outbound)
+	if item.Transport != "" {
+		profile.Transport = item.Transport
+	}
+	profile.Format = item.Format
+	profile.SourceIndex = item.SourceIndex
+	profile.chain = item.Chain
+	profile.rules = item.Rules
+	profile.domainStrategy = item.DomainStrategy
+	return profile, true
 }
 
 // writeFileAtomic replaces a file without leaving a truncated copy behind if
@@ -55,11 +100,7 @@ func saveProfileCache(directory string, profiles []Profile) error {
 	}
 	cached := make([]cachedProfile, 0, len(profiles))
 	for _, profile := range profiles {
-		cached = append(cached, cachedProfile{
-			Name: profile.Name, Transport: profile.Transport, Format: profile.Format, SourceIndex: profile.SourceIndex,
-			Outbound: profile.outbound, Chain: profile.chain,
-			Rules: profile.rules, DomainStrategy: profile.domainStrategy,
-		})
+		cached = append(cached, toCached(profile))
 	}
 	data, err := json.Marshal(cached)
 	if err != nil {
@@ -85,19 +126,9 @@ func loadProfileCache(directory string) ([]Profile, error) {
 	}
 	profiles := make([]Profile, 0, len(cached))
 	for _, item := range cached {
-		if item.Outbound == nil {
-			continue
+		if profile, ok := fromCached(item); ok {
+			profiles = append(profiles, profile)
 		}
-		profile := newProfile(item.Name, item.Outbound)
-		if item.Transport != "" {
-			profile.Transport = item.Transport
-		}
-		profile.SourceIndex = item.SourceIndex
-		profile.Format = item.Format
-		profile.chain = item.Chain
-		profile.rules = item.Rules
-		profile.domainStrategy = item.DomainStrategy
-		profiles = append(profiles, profile)
 	}
 	return profiles, nil
 }

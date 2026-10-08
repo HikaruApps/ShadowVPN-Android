@@ -127,10 +127,10 @@ func profilesFromXrayConfig(config map[string]any) ([]Profile, int) {
 	}
 	rules, domainStrategy := subscriptionRules(routing, byTag)
 
-	profiles := make([]Profile, 0, len(chosen))
+	members := make([]Profile, 0, len(chosen))
 	for _, outbound := range chosen {
-		name := remarks
-		if len(chosen) > 1 || name == "" {
+		name := firstNonEmpty(remarks, stringValue(outbound["tag"]))
+		if len(chosen) > 1 {
 			name = strings.TrimSpace(strings.Join(nonEmpty(remarks, stringValue(outbound["tag"])), " · "))
 		}
 		profile, err := profileFromOutbound(name, outbound, byTag)
@@ -140,9 +140,58 @@ func profilesFromXrayConfig(config map[string]any) ([]Profile, int) {
 		}
 		profile.rules = rules
 		profile.domainStrategy = domainStrategy
-		profiles = append(profiles, profile)
+		members = append(members, profile)
 	}
-	return profiles, ignored
+	switch len(members) {
+	case 0:
+		return nil, ignored
+	case 1:
+		members[0].Name = firstNonEmpty(remarks, members[0].Name)
+		return members, ignored
+	}
+	group := newGroupProfile(firstNonEmpty(remarks, "Балансировщик"), members)
+	group.rules = rules
+	group.domainStrategy = domainStrategy
+	return []Profile{group}, ignored
+}
+
+// newGroupProfile makes one selectable profile out of a balancer's servers.
+func newGroupProfile(name string, members []Profile) Profile {
+	ids := make([]string, 0, len(members))
+	for _, member := range members {
+		ids = append(ids, member.ID)
+	}
+	sum := sha256.Sum256([]byte("group:" + strings.Join(ids, ",")))
+	return Profile{
+		ID: hex.EncodeToString(sum[:12]), Name: name, Protocol: "balancer",
+		SourceIndex: -1, Format: "json", Members: len(members), members: members,
+	}
+}
+
+// flattenGroups replaces balancer profiles by their servers, which inherit
+// the group's source. groupOf maps each such server to its group's ID.
+func flattenGroups(profiles []Profile) (flat []Profile, groupOf map[string]string) {
+	groupOf = map[string]string{}
+	seen := map[string]bool{}
+	for _, profile := range profiles {
+		if len(profile.members) == 0 {
+			if !seen[profile.ID] {
+				seen[profile.ID] = true
+				flat = append(flat, profile)
+			}
+			continue
+		}
+		for _, member := range profile.members {
+			if seen[member.ID] {
+				continue
+			}
+			seen[member.ID] = true
+			member.SourceIndex = profile.SourceIndex
+			groupOf[member.ID] = profile.ID
+			flat = append(flat, member)
+		}
+	}
+	return flat, groupOf
 }
 
 func nonEmpty(values ...string) []string {

@@ -28,6 +28,8 @@ type Profile struct {
 	SourceIndex int    `json:"sourceIndex"`
 	// Format is "json" for servers imported from Xray JSON.
 	Format string `json:"format,omitempty"`
+	// Members is the number of servers behind a balancer profile.
+	Members int `json:"members,omitempty"`
 	// Connection details stay private to Go. Besides keeping credentials out of
 	// the generated Java API, this is required by gomobile: arbitrary Go maps
 	// are not supported in exported structs.
@@ -39,6 +41,9 @@ type Profile struct {
 	chain          []map[string]any
 	rules          []map[string]any
 	domainStrategy string
+	// members are the servers of an Xray JSON config with a balancer. Like
+	// v2rayNG, such a config is one profile; connecting balances its servers.
+	members []Profile
 }
 
 func newProfile(name string, out map[string]any) Profile {

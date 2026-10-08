@@ -84,7 +84,7 @@
 
   function flag(server) {
     const slot = el("span", "server-flag");
-    if (server?.auto) {
+    if (server?.auto || server?.members > 0) {
       slot.append(svg("auto"));
     } else if (server?.countryCode) {
       const image = el("img");
@@ -104,7 +104,10 @@
   function meta(server) {
     if (!server) return "Список серверов";
     if (server.auto) return "Автовыбор лучшего сервера";
-    return [server.protocol, server.transport].filter(Boolean).join(" · ");
+    if (server.members > 0) return `Балансировщик · ${server.members} ${plural(server.members, ["сервер", "сервера", "серверов"])}`;
+    // Hysteria reports the same name as protocol and transport.
+    const transport = server.transport && server.transport !== server.protocol ? server.transport : "";
+    return [server.protocol, transport].filter(Boolean).join(" · ");
   }
 
   // "JSON" badge left of protocol · transport for servers imported from Xray JSON.
@@ -1051,6 +1054,7 @@
     const code = countries[i % countries.length];
     mockServers.push({id:`s${i}`,source:i % 5 === 0 ? "LTE" : "Wi-Fi",name:`${code.toUpperCase()} ${i + 1} | ${["Hysteria","Torrent","Gemini | gRPC","WARP"][i % 4]}`,countryCode:code,protocol:"VLESS",transport:["TCP","GRPC","WS"][i % 3],format:i % 3 === 0 ? "json" : "",auto:false,selected:i === 0,latency:i % 7 === 6 ? 0 : 40 + (i * 37) % 500,available:i % 7 !== 6});
   }
+  mockServers.splice(1, 0, {id:"group",name:"Авто-выбор 🚀",countryCode:"",protocol:"BALANCER",transport:"",members:8,format:"json",source:"Wi-Fi",auto:false,selected:false,latency:52,available:true});
   const mockApps = Array.from({length: 180}, (_, i) => ({name:`Приложение ${i + 1}`,packageName:`com.example.app${i + 1}`}));
   native.getInstalledApps = () => JSON.stringify({apps: mockApps});
   render({
