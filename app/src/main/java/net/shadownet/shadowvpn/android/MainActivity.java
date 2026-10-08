@@ -13,6 +13,7 @@ import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.drawable.Drawable;
 import android.net.TrafficStats;
 import android.net.Uri;
@@ -24,11 +25,14 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 import android.util.Base64;
 
@@ -59,6 +63,7 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final int VPN_REQUEST = 100;
     private static final String UI_URL = "file:///android_asset/shadowvpn/index.html";
+    private static final int UI_BACKGROUND = Color.rgb(10, 10, 10);
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService appWorker = Executors.newSingleThreadExecutor();
@@ -73,6 +78,7 @@ public final class MainActivity extends Activity {
     private SharedPreferences preferences;
     private WebView webView;
     private boolean webReady;
+    private String lastRuntimeSnapshot = "";
     private boolean importRunning;
     private boolean pingRunning;
     private boolean wasConnected;
@@ -113,15 +119,15 @@ public final class MainActivity extends Activity {
                     getContentResolver(), Settings.Secure.ANDROID_ID));
             deviceHwid = Bridge.deviceHWID();
         } catch (Exception ignored) { }
-        getWindow().setStatusBarColor(Color.BLACK);
-        getWindow().setNavigationBarColor(Color.BLACK);
+        getWindow().setStatusBarColor(UI_BACKGROUND);
+        getWindow().setNavigationBarColor(UI_BACKGROUND);
         setupWebView();
         appWorker.execute(() -> installedAppsCache = installedAppsJson().toString());
     }
 
     private void setupWebView() {
         webView = new WebView(this);
-        webView.setBackgroundColor(Color.rgb(8, 8, 8));
+        webView.setBackgroundColor(UI_BACKGROUND);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(false);
@@ -149,8 +155,27 @@ public final class MainActivity extends Activity {
                 else fetchPublicIp(false);
             }
         });
-        setContentView(webView);
+        setContentView(createInsetRoot(webView));
         webView.loadUrl(UI_URL);
+    }
+
+    // Android 15 draws apps edge-to-edge; keep the web UI clear of the status bar,
+    // navigation bar, display cutout and keyboard by padding its container.
+    private FrameLayout createInsetRoot(WebView content) {
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(UI_BACKGROUND);
+        root.addView(content, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setDecorFitsSystemWindows(false);
+            root.setOnApplyWindowInsetsListener((view, insets) -> {
+                Insets bars = insets.getInsets(WindowInsets.Type.systemBars()
+                        | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                return WindowInsets.CONSUMED;
+            });
+        }
+        return root;
     }
 
     @Override protected void onResume() {
@@ -531,13 +556,17 @@ public final class MainActivity extends Activity {
 
     private void pushSnapshot() {
         if (!webReady || webView == null) return;
+        lastRuntimeSnapshot = "";
         JSONObject snapshot = buildSnapshot();
         webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.render(" + snapshot + ")", null);
     }
 
     private void pushRuntimeSnapshot() {
         if (!webReady || webView == null) return;
-        JSONObject snapshot = runtimeSnapshot();
+        String snapshot = runtimeSnapshot().toString();
+        // The status timer ticks twice a second; skip frames that change nothing.
+        if (snapshot.equals(lastRuntimeSnapshot)) return;
+        lastRuntimeSnapshot = snapshot;
         webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.render(" + snapshot + ")", null);
     }
 

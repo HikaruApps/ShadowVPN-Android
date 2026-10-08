@@ -37,7 +37,12 @@ cd go && go test ./bridge -run TestParseNaiveHTTPSURI   # single test
 Three layers, all in one process:
 
 1. **UI — WebView SPA** (`app/src/main/assets/shadowvpn/`: `index.html`, `app.js`,
-   `styles.css`, flag SVGs). Not native Android views.
+   `styles.css`, flag SVGs, `logo.png`). Not native Android views. Opening
+   `index.html` in a desktop browser renders mock data (no `window.ShadowVpnAndroid`);
+   query params `?disconnected`, `?error`, `?lite`, `?preview=servers|menu|welcome|settings|
+   subscriptions|logs|connection|split|application|about|auto` open specific screens.
+   Long lists (servers, apps, Auto servers) are paged in via `lazyList`; the
+   `html.lite` class (low RAM/CPU devices) disables shadows and animations.
 2. **Java host** (`app/src/main/java/net/shadownet/shadowvpn/android/`)
    - `MainActivity` hosts the WebView, exposes the `AndroidBridge` inner class to JS
      as `window.ShadowVpnAndroid` (`@JavascriptInterface` methods: `toggleVpn`,
