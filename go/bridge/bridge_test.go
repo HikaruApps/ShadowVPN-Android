@@ -69,7 +69,7 @@ func TestAndroidRuntimeConfigRemovesPlatformOwnedTunSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	encoded, err := androidRuntimeConfig(raw, 1400)
+	encoded, err := androidRuntimeConfig(raw, androidRuntimeOptions{MTU: 1400, DNS: dnsPresets["cloudflare"]})
 	if err != nil {
 		t.Fatal(err)
 	}

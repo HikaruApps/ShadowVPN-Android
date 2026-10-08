@@ -52,29 +52,45 @@ time; this keeps the download substantially smaller than the installed size.
 ## Features
 
 - Separate Wi-Fi and LTE HTTPS subscription sources with subscription traffic
-  metadata.
-- Desktop-compatible subscription parsing, including VLESS, Trojan, Hysteria2,
-  NaiveProxy over HTTP/2 or QUIC/HTTP/3, and Xray JSON profiles. Naive links use
-  `naive+https://user:pass@host` or `naive+quic://user:pass@host`. The embedded
-  Cronet transport is installed directly as an Xray outbound; it does not open
-  a localhost SOCKS listener or add a second TUN/VPN core.
-- Selection of a server or Auto/Auto without Russia, Android VPN permission
-  prompt, foreground VPN service and Android TUN descriptor passed into the
-  pinned Xray core.
-- Bootstrap DNS resolution before establishing the VPN, IPv4/IPv6 default
-  routes, and an explicit disconnect path.
-- Mobile server drawer with filtering, sorting, latency checks and country
-  flags.
-- Connection traffic, session time, public IP and subscription quota display.
-- Per-app split tunneling, connection settings, logs and Android battery/VPN
-  settings shortcuts.
+  metadata, plus manually pasted configs. With both subscriptions set, Auto
+  uses the one that matches the current network and reconnects when the phone
+  switches between Wi-Fi and mobile data.
+- Share links: VLESS, VMess (v2rayN format), Trojan, Shadowsocks (SIP002 and
+  legacy), Hysteria2 and NaiveProxy over HTTP/2 or QUIC/HTTP/3
+  (`naive+https://user:pass@host`, `naive+quic://user:pass@host`). A broken or
+  unsupported line is skipped instead of failing the whole subscription.
+- Xray JSON: arrays of full client configs (the "v2ray-json" subscription
+  format), single configs and bare outbounds. VLESS, VMess, Trojan,
+  Shadowsocks, Hysteria, SOCKS, HTTP and WireGuard servers in flat or
+  `vnext`/`servers` form; every balancer member becomes a separate server; a
+  freedom dialer chain (`sockopt.dialerProxy`, the usual fragmentation setup)
+  and `mux` are kept. Listeners, DNS and host-level socket options are never
+  imported. Routing rules are sanitized to proxy/direct/block and applied when
+  "Правила из подписки" is on.
+- Servers are cached in app storage: the list appears instantly on launch, the
+  app works offline, and an always-on VPN connects after a reboot.
+- Routing: full tunnel, "everything except the rules" or "only the rules",
+  with domains, `full:`/`keyword:`/`regexp:`, `geosite:` and `geoip:`.
+  GeoIP (runetfreedom) and GeoSite (v2fly) download on first use into app
+  storage, refresh weekly and fall back to the cached copy offline. Their
+  sources can be changed in settings.
+- All DNS of the tunnel is answered by Xray through the proxy with the chosen
+  provider (subscription DoH, Cloudflare, Google, Quad9 or custom servers).
+- Local networks stay outside the tunnel (optional), IPv6 is opt-in and
+  blocked by Android when off, per-app split tunneling, TLS fragmentation.
+- Nothing listens on localhost: the exit IP is checked through the Xray
+  instance itself. Latency checks and subscription updates work while
+  connected; changing settings while connected reconnects automatically.
+- Connection traffic, session time, public IP and subscription quota display,
+  Xray warnings in the log screen.
 - Patched local uTLS source with an updated ShadowVPN ClientHello profile.
 
 Auto uses the desktop TCP pre-check and Xray leastPing/Observatory; Naive
 profiles are selected manually because Xray Observatory cannot balance an
 external Cronet transport. The Windows
 WFP Kill Switch cannot be reused on Android; the app opens Android's native VPN
-lockdown settings instead.
+lockdown settings instead, and the service connects with the saved settings
+when Android starts it as an always-on VPN.
 
 The app excludes its own UID from the VPN so its Xray outbound sockets do not
 loop into the tunnel. Android owns the IP addresses, routes and system DNS;
