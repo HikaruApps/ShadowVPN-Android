@@ -35,7 +35,7 @@ img{display:block}
 :focus-visible{outline:2px solid var(--text-2);outline-offset:2px}
 
 /* ---------- Shell ---------- */
-.app{position:relative;height:100%;height:100dvh;display:grid;grid-template-rows:56px minmax(0,1fr) auto;padding:0 var(--gutter) var(--gutter);overflow:hidden;isolation:isolate}
+.app{position:relative;height:100%;height:100dvh;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:56px minmax(0,1fr) auto;padding:0 var(--gutter) var(--gutter);overflow:hidden;isolation:isolate}
 
 .icon-button{width:40px;height:40px;flex:0 0 40px;display:grid;place-items:center;border:1px solid var(--border);border-radius:50%;color:var(--text-2);transition:background 150ms ease,color 150ms ease}
 .icon-button:active{background:var(--surface-2);color:var(--text)}
@@ -99,7 +99,11 @@ img{display:block}
 .app[data-state="connected"] .ip-pill .dot{background:var(--success)}
 .app[data-state="connecting"] .ip-pill .dot{animation:pulse 1s ease-in-out infinite}
 
-.dock{position:relative;z-index:10}
+.dock{position:relative;z-index:10;min-width:0}
+.stage,.topbar{min-width:0}
+/* Closing overlays must not swallow the next tap while they fade out. */
+.scrim.closing,.panel-overlay.closing{pointer-events:none}
+button,label,select,input{touch-action:manipulation}
 .server-picker{width:100%;min-height:68px;display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);text-align:left;touch-action:none;transition:background 150ms ease}
 .server-picker:active{background:var(--surface-2)}
 .chevron{flex:0 0 20px;color:var(--text-3)}
