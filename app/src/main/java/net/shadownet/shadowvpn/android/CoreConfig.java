@@ -90,8 +90,15 @@ final class CoreConfig {
     static int currentTransport(Context context) {
         ConnectivityManager manager = context.getSystemService(ConnectivityManager.class);
         if (manager == null) return -1;
-        Network network = manager.getActiveNetwork();
-        NetworkCapabilities capabilities = network == null ? null : manager.getNetworkCapabilities(network);
+        NetworkCapabilities capabilities;
+        try {
+            Network network = manager.getActiveNetwork();
+            capabilities = network == null ? null : manager.getNetworkCapabilities(network);
+        } catch (RuntimeException error) {
+            // Not knowing the network only disables the Wi-Fi/LTE preference;
+            // it must never stop the VPN from connecting.
+            return -1;
+        }
         if (capabilities == null) return -1;
         if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
                 || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
