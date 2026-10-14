@@ -3,7 +3,6 @@
 package bridge
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +41,12 @@ var mobile struct {
 	importing bool
 	options   mobileOptions
 	dataDir   string
+	// tunFD is VpnService's TUN descriptor; it outlives Xray instances so the
+	// server can change without Android tearing the VPN down.
+	tunFD          int
+	profileID      string
+	switching      bool
+	watchdogCancel context.CancelFunc
 }
 
 type mobileOptions struct {
@@ -338,110 +342,26 @@ func dialThroughInstance(ctx context.Context, instance *core.Instance, address s
 // the default route. This avoids a DNS bootstrap loop.
 func Prepare(profileID string) error {
 	mobile.Lock()
-	defer mobile.Unlock()
 	if mobile.instance != nil {
+		mobile.Unlock()
 		return errors.New("VPN уже подключён")
 	}
-	if mobile.naive != nil {
-		_ = mobile.naive.Close()
-		mobile.naive = nil
-	}
-	mobile.prepared = nil
-	options := mobile.options
-	dnsID := options.DNSID
-	if dnsID == "" {
-		dnsID = "cloudflare"
-	}
-	_, dns, err := selectedDNSWithDoH(dnsID, options.CustomDNS, options.DoHURL)
-	if err != nil {
-		return err
-	}
-	geoIP, geoSite := options.geoURLs()
-	routing, err := newRoutingOptions(options.RoutingMode, options.RoutingRules, geoIP, geoSite)
-	if err != nil {
-		return err
-	}
-	runtime := androidRuntimeOptions{
-		MTU:               options.TunMTU,
-		IPv6:              options.IPv6,
-		DNS:               dns,
-		RoutingMode:       routing.Mode,
-		SubscriptionRules: options.SubscriptionRules,
-		LogPath:           xrayLogPath(mobile.dataDir),
-		GeoData: func(needIP, needSite bool) (geoDataInfo, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			defer cancel()
-			return ensureGeoData(ctx, mobile.dataDir, needIP, needSite, geoIP, geoSite)
-		},
-	}
+	closeNaive(mobile.naive)
+	mobile.naive, mobile.prepared = nil, nil
+	inputs := currentSessionInputs()
+	mobile.Unlock()
 
-	// Auto and balancer configs from Xray JSON both run Xray's leastPing
-	// balancer over a set of servers, fastest first.
-	balance := func(candidates []Profile, empty string) error {
-		if len(candidates) == 0 {
-			return errors.New(empty)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		results := pingProfiles(ctx, candidates)
-		prepared, _, _, err := prepareAutoProfiles(ctx, candidates, results)
-		if err != nil {
-			return err
-		}
-		config, err := makeAutoConfigWithRoutingAndDoH(prepared, dnsID, options.CustomDNS, options.DoHURL, options.Fragmentation, "", routing)
-		if err != nil {
-			return err
-		}
-		runtime.Profiles = prepared
-		runtime.Auto = true
-		mobile.prepared, err = androidRuntimeConfig(config, runtime)
+	config, naive, err := buildSessionFunc(profileID, inputs)
+	if err != nil {
 		return err
 	}
-	if isAutoProfileID(profileID) {
-		return balance(autoCandidates(mobile.profiles, options, profileID), "Для Auto нет подходящих серверов")
+	mobile.Lock()
+	defer mobile.Unlock()
+	if mobile.instance != nil {
+		closeNaive(naive)
+		return errors.New("VPN уже подключён")
 	}
-
-	var chosen *Profile
-	for i := range mobile.profiles {
-		if mobile.profiles[i].ID == profileID {
-			chosen = &mobile.profiles[i]
-			break
-		}
-	}
-	if chosen == nil {
-		return errors.New("Сервер отсутствует в подписке. Обновите её")
-	}
-	if len(chosen.members) > 0 {
-		return balance(profilesWithoutProtocol(chosen.members, "naive"), "В балансировщике нет подходящих серверов")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	resolved, _, err := resolveProfileEndpoint(ctx, *chosen)
-	if err != nil {
-		return errors.New("Не удалось определить IP сервера")
-	}
-	var naive *naiveRuntime
-	if resolved.Protocol == "naive" {
-		naive, err = newNaiveRuntime(resolved)
-		if err != nil {
-			return err
-		}
-	}
-	// A profile that already chains through a fragmenting dialer must not be
-	// fragmented twice.
-	fragmentation := options.Fragmentation && len(resolved.chain) == 0
-	config, err := makeConfigWithRoutingAndDoH(resolved, dnsID, options.CustomDNS, options.DoHURL, fragmentation, "", routing)
-	if err == nil {
-		runtime.Profiles = []Profile{resolved}
-		mobile.prepared, err = androidRuntimeConfig(config, runtime)
-	}
-	if err != nil {
-		if naive != nil {
-			_ = naive.Close()
-		}
-		return err
-	}
-	mobile.naive = naive
+	mobile.prepared, mobile.naive, mobile.profileID = config, naive, profileID
 	return nil
 }
 
@@ -504,57 +424,29 @@ func Start(tunFD int) error {
 	if logPath := xrayLogPath(mobile.dataDir); logPath != "" {
 		_ = os.WriteFile(logPath, nil, 0o600)
 	}
-	if err := os.Setenv("XRAY_TUN_FD", strconv.Itoa(tunFD)); err != nil {
-		return err
-	}
-	defer os.Unsetenv("XRAY_TUN_FD")
-	if mobile.naive != nil {
-		if err := mobile.naive.Start(); err != nil {
-			mobile.naive = nil
-			mobile.prepared = nil
-			return err
-		}
-	}
-	config, err := core.LoadConfig("json", bytes.NewReader(mobile.prepared))
-	if err != nil {
-		if mobile.naive != nil {
-			_ = mobile.naive.Close()
-			mobile.naive = nil
-		}
-		return err
-	}
-	instance, err := core.New(config)
-	if err != nil {
-		if mobile.naive != nil {
-			_ = mobile.naive.Close()
-			mobile.naive = nil
-		}
-		return err
-	}
-	if mobile.naive != nil {
-		if err = mobile.naive.Install(instance, "proxy"); err != nil {
+	config, naive := mobile.prepared, mobile.naive
+	mobile.prepared, mobile.naive = nil, nil
+	instance, tun, err := startDetached(config, naive)
+	if err == nil {
+		if err = attachTunFunc(instance, tun, tunFD); err != nil {
 			_ = instance.Close()
-			_ = mobile.naive.Close()
-			mobile.naive = nil
-			return err
 		}
 	}
-	if err = instance.Start(); err != nil {
-		_ = instance.Close()
-		if mobile.naive != nil {
-			_ = mobile.naive.Close()
-			mobile.naive = nil
-		}
+	if err != nil {
+		closeNaive(naive)
 		return err
 	}
-	mobile.instance = instance
+	mobile.instance, mobile.naive, mobile.tunFD = instance, naive, tunFD
+	startWatchdogLocked()
 	return nil
 }
 
 func Stop() error {
 	mobile.Lock()
 	defer mobile.Unlock()
+	stopWatchdogLocked()
 	mobile.prepared = nil
+	mobile.profileID = ""
 	var closeErr error
 	if mobile.instance != nil {
 		instance := mobile.instance

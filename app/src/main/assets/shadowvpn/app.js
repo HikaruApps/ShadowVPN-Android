@@ -272,9 +272,17 @@
   function renderStatus(connected, connecting) {
     const selected = snapshot.selected;
     const error = snapshot.state === "error";
-    const key = [snapshot.state, selected?.id, selected?.name, error ? snapshot.serviceStatus : ""].join("\u0000");
+    const target = switchTarget();
+    const key = [snapshot.state, selected?.id, selected?.name, target?.id, error ? snapshot.serviceStatus : ""].join("\u0000");
     if (key === statusKey) return;
     statusKey = key;
+    if (connected && target) {
+      // The tunnel stays up on the current server until the new one answers.
+      setText("statusText", "Переключение…");
+      const detail = $("statusDetail");
+      detail.replaceChildren(flag(target), el("span", null, target.name));
+      return;
+    }
     setText("statusText", connected ? "Подключено"
       : connecting ? "Подключение…"
       : error ? "Ошибка подключения"
@@ -289,6 +297,11 @@
     } else {
       detail.textContent = selected ? "Нажмите, чтобы подключиться" : "Выберите сервер ниже";
     }
+  }
+
+  function switchTarget() {
+    const id = snapshot.switchingTo;
+    return id ? snapshot.servers.find(server => server.id === id) || { id, name: "другой сервер" } : null;
   }
 
   function renderQuota(connected) {
@@ -328,7 +341,7 @@
     const connected = state === "connected";
     const connecting = state === "connecting";
     const power = $("powerButton");
-    power.disabled = connecting || !snapshot.selected;
+    power.disabled = connecting || !snapshot.selected || !!snapshot.switchingTo;
     power.setAttribute("aria-label", connected ? "Отключить VPN" : "Подключить VPN");
     renderStatus(connected, connecting);
 

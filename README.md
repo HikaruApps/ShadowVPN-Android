@@ -78,6 +78,12 @@ time; this keeps the download substantially smaller than the installed size.
   provider (subscription DoH, Cloudflare, Google, Quad9 or custom servers).
 - Local networks stay outside the tunnel (optional), IPv6 is opt-in and
   blocked by Android when off, per-app split tunneling, TLS fragmentation.
+- Switching servers while connected keeps the VPN up: the new server is
+  connected and tested first, traffic moves over, then the old connection
+  closes; if the new server does not answer, the current one stays. After a
+  network change, or when a periodic check finds the tunnel stalled, the
+  connection is rebuilt the same way. Xray-only settings apply without a drop.
+- Hysteria2 obfuscation (`obfs=salamander&obfs-password=…`).
 - Nothing listens on localhost: the exit IP is checked through the Xray
   instance itself. Latency checks and subscription updates work while
   connected; changing settings while connected reconnects automatically.

@@ -633,3 +633,51 @@ func TestPingGroupTakesFastestMember(t *testing.T) {
 	}
 	t.Fatalf("no result for the group: %s", encoded)
 }
+
+func TestHysteria2SalamanderObfs(t *testing.T) {
+	profile, err := parseURI("hy2://secret@198.51.100.9:443?sni=hy.example&obfs=salamander&obfs-password=mask-pass#HY2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := profile.outbound["streamSettings"].(map[string]any)
+	udp := stream["finalmask"].(map[string]any)["udp"].([]any)[0].(map[string]any)
+	if udp["type"] != "salamander" || udp["settings"].(map[string]any)["password"] != "mask-pass" {
+		t.Fatalf("salamander mask missing: %#v", stream["finalmask"])
+	}
+	routing, _ := newRoutingOptions("full", nil, "", "")
+	config, err := makeConfigWithRoutingAndDoH(profile, "cloudflare", nil, "", true, "", routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := androidRuntimeConfig(config, androidRuntimeOptions{DNS: dnsPresets["cloudflare"], RoutingMode: "full", Profiles: []Profile{profile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.LoadConfig("json", bytes.NewReader(encoded)); err != nil {
+		t.Fatalf("Xray rejected Hysteria2 obfs: %v", err)
+	}
+	for _, link := range []string{
+		"hy2://secret@198.51.100.9:443?obfs=salamander",
+		"hy2://secret@198.51.100.9:443?obfs=gecko&obfs-password=x",
+		"hy2://secret@198.51.100.9:443?obfs-password=x",
+	} {
+		if _, err := parseURI(link); err == nil {
+			t.Fatalf("invalid obfs accepted: %s", link)
+		}
+	}
+
+	// Fragmentation adds its TCP mask without dropping a mask the profile has.
+	masked := mustProfile(t, `{"protocol":"vless","settings":{"address":"203.0.113.30","port":443,"id":"u","encryption":"none"},
+	  "streamSettings":{"network":"xhttp","finalmask":{"udp":[{"type":"noise"}]}}}`)
+	outbound, err := configuredOutbound(masked, "proxy", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mask := outbound["streamSettings"].(map[string]any)["finalmask"].(map[string]any)
+	if mask["udp"] == nil || mask["tcp"] == nil {
+		t.Fatalf("fragmentation overwrote the existing mask: %#v", mask)
+	}
+	if masked.outbound["streamSettings"].(map[string]any)["finalmask"].(map[string]any)["tcp"] != nil {
+		t.Fatal("fragmentation must not modify the stored profile")
+	}
+}

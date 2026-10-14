@@ -63,9 +63,15 @@ Three layers, all in one process:
 3. **Go core** (`go/bridge/`, Java package `net.shadownet.shadowvpn.core.bridge.Bridge`)
    - Exported gomobile API in `bridge.go`: `SetDataDir`, `SetDeviceSeed`, `DeviceHWID`,
      `LoadCachedProfiles`, `Configure(optionsJSON)`, `ImportSources({"urls","manual"})`,
-     `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `Stop`, `PublicIP`, `Logs`. Data
+     `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `Stop`, `SwitchProfile(profileID)`,
+     `Reload`, `PublicIP`, `Logs`. Data
      crosses the boundary as JSON strings; global state lives in the mutex-guarded `mobile`
      struct. Only types gomobile supports may appear in exported signatures.
+   - `session.go` keeps the TUN fd across Xray instances: a new instance starts without its
+     TUN inbound (`startDetached`), is probed with a real request through it, then the old
+     instance is closed and the TUN inbound attached (`attachTun`). `SwitchProfile`,
+     `Reload` (network change, Xray-only settings) and the watchdog (rebuilds after
+     consecutive failed probes) all use this; a failed probe keeps the current server.
    - Android-only files: `xrayjson.go` (Xray JSON import and sanitizing), `links.go`
      (vmess://, ss://), `android_config.go` (turns the desktop config into the Android
      runtime config: DNS through `dns-out`, rule ordering, subscription rules, dialer
