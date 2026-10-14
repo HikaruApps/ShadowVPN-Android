@@ -62,6 +62,7 @@ final class CoreConfig {
         options.put("routeOnly", preferences.getBoolean("route_only", false));
         options.put("blockUdp", preferences.getBoolean("block_udp", false));
         options.put("memoryLimitMb", memoryLimit(preferences));
+        options.put("localProxy", localProxy(preferences));
         try {
             options.put("autoProfileIds", new JSONArray(preferences.getString("auto_profiles", "[]")));
         } catch (Exception ignored) {
@@ -122,6 +123,47 @@ final class CoreConfig {
         } catch (Exception ignored) {
             return 1400;
         }
+    }
+
+    static boolean proxyEnabled(SharedPreferences preferences) {
+        return preferences.getBoolean("proxy_enabled", false);
+    }
+
+    /** Proxy only: the core runs the local proxy without a TUN, so no VPN appears in Android. */
+    static boolean proxyOnly(SharedPreferences preferences) {
+        return proxyEnabled(preferences) && preferences.getBoolean("proxy_only", false);
+    }
+
+    static int port(SharedPreferences preferences, String key, int fallback) {
+        try {
+            int port = Integer.parseInt(preferences.getString(key, String.valueOf(fallback)));
+            return port >= 1024 && port <= 65535 ? port : fallback;
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private static JSONObject localProxy(SharedPreferences preferences) throws Exception {
+        JSONObject proxy = new JSONObject();
+        boolean enabled = proxyEnabled(preferences);
+        proxy.put("socksPort", enabled ? port(preferences, "proxy_socks_port", 10808) : 0);
+        proxy.put("httpPort", enabled && preferences.getBoolean("proxy_http", false)
+                ? port(preferences, "proxy_http_port", 10809) : 0);
+        proxy.put("username", preferences.getString("proxy_user", ""));
+        proxy.put("password", preferences.getString("proxy_pass", ""));
+        proxy.put("lan", preferences.getBoolean("proxy_lan", false));
+        return proxy;
+    }
+
+    /** Random credentials: the proxy must never be usable without them. */
+    static void newProxyCredentials(SharedPreferences.Editor editor) {
+        java.security.SecureRandom random = new java.security.SecureRandom();
+        String alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        StringBuilder user = new StringBuilder("svpn");
+        for (int i = 0; i < 4; i++) user.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        StringBuilder password = new StringBuilder();
+        for (int i = 0; i < 16; i++) password.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        editor.putString("proxy_user", user.toString()).putString("proxy_pass", password.toString());
     }
 
     static int memoryLimit(SharedPreferences preferences) {

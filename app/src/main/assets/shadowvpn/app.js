@@ -6,7 +6,7 @@
   const native = window.ShadowVpnAndroid || {
     ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {},
     saveSubscriptions() {}, saveSettings() {}, getLogs() { return ""; }, copyText() {}, openVpnSettings() {},
-    getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}
+    getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}, resetProxyCredentials() {}
   };
 
   // Weak devices get a static UI: no shadows and no decorative animation.
@@ -40,6 +40,7 @@
   let splitAppsReceiver = null;
   let appIconObserver = null;
   let refreshBattery = null;
+  let refreshProxy = null;
   // A drag that ends over a button must not also press it.
   let suppressClickUntil = 0;
   document.addEventListener("click", event => {
@@ -51,6 +52,7 @@
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.7 5.6 3.7 9s-1.2 6.4-3.7 9c-2.5-2.6-3.7-5.6-3.7-9S9.5 5.6 12 3Z"/>',
     servers: '<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>',
     connection: '<path d="M5 12.5a10 10 0 0 1 14 0M8 15.5a5.5 5.5 0 0 1 8 0M12 19h.01"/>',
+    proxy: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M7 10h.01M11 10h6"/>',
     tunnel: '<path d="M3 19v-8a9 9 0 0 1 18 0v8M2 19h20M8 19v-7a4 4 0 0 1 8 0v7"/>',
     routing: '<circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H14a4 4 0 0 0 4-4V8.5M15.5 6H10a4 4 0 0 0-4 4v5.5"/>',
     split: '<path d="M6 3v6a3 3 0 0 0 3 3h6a3 3 0 0 1 3 3v6M18 3v6a3 3 0 0 1-3 3"/><path d="M9 12a3 3 0 0 0-3 3v6"/>',
@@ -382,6 +384,7 @@
     $("refreshButton").disabled = !!snapshot.importRunning;
     renderServers();
     refreshBattery?.(!!snapshot.settings?.batteryUnrestricted);
+    refreshProxy?.(snapshot.settings || {});
 
     $("welcome").hidden = !snapshot.needsSubscription;
     if (snapshot.message && snapshot.message !== lastMessage) showToast(snapshot.message);
@@ -573,6 +576,7 @@
     panelPager?.disconnect();
     panelPager = null;
     refreshBattery = null;
+    refreshProxy = null;
     if (appIconObserver) { appIconObserver.disconnect(); appIconObserver = null; }
   }
 
@@ -727,6 +731,7 @@
         navRow("servers", "Серверы", "Подписки, обновление и автовыбор", buildServerSettings),
         navRow("connection", "Соединение", "Автоподключение, DNS, MTU и локальная сеть", buildConnectionSettings),
         navRow("tunnel", "Туннель", "Фрагментация, Mux, UDP и память", buildTunnelSettings),
+        navRow("proxy", "Локальный прокси", "SOCKS5 и HTTP с паролем, хотспот", buildProxySettings),
         navRow("routing", "Маршрутизация", "Что идёт через VPN, а что напрямую", buildRoutingSettings),
         navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling),
         navRow("application", "Приложение", "Фоновая работа", buildApplicationSettings)),
@@ -1018,6 +1023,71 @@
     })));
   }
 
+  function buildProxySettings() {
+    const body = page("Локальный прокси", buildSettings);
+    const s = snapshot.settings || {};
+    const enabled = switchControl(!!s.proxyEnabled);
+    const http = switchControl(!!s.proxyHttp);
+    const lan = switchControl(!!s.proxyLan);
+    const only = switchControl(!!s.proxyOnly);
+    const portField = (value, fallback) => {
+      const input = el("input", "field port-field");
+      input.type = "number";
+      input.inputMode = "numeric";
+      input.min = "1024";
+      input.max = "65535";
+      input.value = value || fallback;
+      return input;
+    };
+    const socksPort = portField(s.proxySocksPort, "10808");
+    const httpPort = portField(s.proxyHttpPort, "10809");
+    body.append(
+      el("p", "group-note", "Другие приложения на телефоне видят открытые порты, поэтому прокси работает только с логином и паролем."),
+      group("Прокси",
+        row("SOCKS5-прокси", "Через то же подключение, что и VPN", enabled),
+        row("Порт SOCKS5", null, socksPort),
+        row("HTTP-прокси", "Для приложений без поддержки SOCKS5", http),
+        row("Порт HTTP", null, httpPort)),
+      group("Доступ",
+        row("Доступ через хотспот", "Для устройств в вашей Wi-Fi-сети или точке доступа. UDP только на самом телефоне", lan)));
+
+    const address = el("small", "mono");
+    const user = el("small", "mono");
+    const pass = el("small", "mono");
+    const credentialRow = (name, value, field) => {
+      const node = row(name, null, button("Копировать", "secondary", () => native.copyText(field() || ""), true));
+      node.querySelector(".row-copy").append(value);
+      return node;
+    };
+    const addressRow = row("Адрес", null);
+    addressRow.querySelector(".row-copy").append(address);
+    body.append(group("Подключение",
+      addressRow,
+      credentialRow("Логин", user, () => snapshot.settings?.proxyUser),
+      credentialRow("Пароль", pass, () => snapshot.settings?.proxyPass)));
+    body.append(actions(button("Сбросить логин и пароль", "secondary", () => native.resetProxyCredentials())));
+    body.append(group("Режим",
+      row("Только прокси, без VPN", "Без туннеля и значка VPN: прокси нужно указать в приложениях вручную", only)));
+
+    refreshProxy = settings => {
+      const hosts = isOn(lan) ? (settings.proxyAddresses || []) : [];
+      const host = hosts[0] || (isOn(lan) ? "IP телефона в сети" : "127.0.0.1");
+      const ports = [`SOCKS5 ${socksPort.value}`].concat(isOn(http) ? [`HTTP ${httpPort.value}`] : []);
+      address.textContent = `${host} · ${ports.join(" · ")}`;
+      user.textContent = settings.proxyUser || "Появится после сохранения";
+      pass.textContent = settings.proxyPass || "Появится после сохранения";
+    };
+    const sync = () => refreshProxy(snapshot.settings || {});
+    [lan, http].forEach(control => control.addEventListener("click", sync));
+    [socksPort, httpPort].forEach(field => field.addEventListener("input", sync));
+    sync();
+
+    body.append(saveActions(() => ({
+      proxyEnabled: isOn(enabled), proxyHttp: isOn(http), proxyLan: isOn(lan), proxyOnly: isOn(only),
+      proxySocksPort: socksPort.value, proxyHttpPort: httpPort.value
+    })));
+  }
+
   function buildApplicationSettings() {
     const body = page("Приложение", buildSettings);
     const s = snapshot.settings || {};
@@ -1188,7 +1258,7 @@
     selected:{...mockServers[1],subscription:{title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000}},
     servers:mockServers,
     subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
-    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,killSwitch:false,mux:false,ipType:"auto",routeOnly:false,blockUdp:false,memoryLimit:"0",dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
+    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,killSwitch:false,mux:false,ipType:"auto",routeOnly:false,blockUdp:false,memoryLimit:"0",proxyEnabled:true,proxyHttp:true,proxySocksPort:"10808",proxyHttpPort:"10809",proxyLan:true,proxyOnly:false,proxyUser:"svpnA7kq",proxyPass:"Xm4tQ9rWb2nLp8Vz",proxyAddresses:["192.168.43.1"],dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
   });
   if (params.has("disconnected")) render({ state:"disconnected", serviceStatus:"", publicIp:"85.95.178.108", session:"" });
   if (params.has("blocked")) render({ state:"blocked", serviceStatus:"Ошибка: сервер не отвечает", publicIp:"" });
@@ -1198,8 +1268,8 @@
   if (preview === "menu") setMenu(true);
   if (preview === "welcome") render({ needsSubscription:true });
   if (["settings", "subscriptions", "logs"].includes(preview)) openPanel(preview);
-  if (["connection", "tunnel", "routing", "split", "application", "about", "auto"].includes(preview)) {
+  if (["connection", "tunnel", "proxy", "routing", "split", "application", "about", "auto"].includes(preview)) {
     openPanel("settings");
-    ({ connection:buildConnectionSettings, tunnel:buildTunnelSettings, routing:buildRoutingSettings, split:buildSplitTunneling, application:buildApplicationSettings, about:buildAbout, auto:buildServerSettings })[preview]();
+    ({ connection:buildConnectionSettings, tunnel:buildTunnelSettings, proxy:buildProxySettings, routing:buildRoutingSettings, split:buildSplitTunneling, application:buildApplicationSettings, about:buildAbout, auto:buildServerSettings })[preview]();
   }
 })();
