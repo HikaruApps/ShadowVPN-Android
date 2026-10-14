@@ -500,7 +500,8 @@ public final class MainActivity extends Activity {
             pushSnapshot();
             return;
         }
-        Intent permission = VpnService.prepare(this);
+        // Proxy only opens no VPN interface and needs no VPN permission.
+        Intent permission = CoreConfig.proxyOnly(preferences) ? null : VpnService.prepare(this);
         if (permission != null) startActivityForResult(permission, VPN_REQUEST);
         else startSelectedServer();
     }
@@ -513,6 +514,14 @@ public final class MainActivity extends Activity {
     private void startSelectedServer() {
         ServerItem selected = findSelected();
         if (selected == null) return;
+        // Moving from proxy only to VPN may be the first time a VPN is needed.
+        if (!CoreConfig.proxyOnly(preferences)) {
+            Intent permission = VpnService.prepare(this);
+            if (permission != null) {
+                startActivityForResult(permission, VPN_REQUEST);
+                return;
+            }
+        }
         if ("include".equals(preferences.getString("app_routing_mode", "all"))) {
             try {
                 if (new JSONArray(preferences.getString("app_routing_packages", "[]")).length() == 0) {
@@ -733,6 +742,15 @@ public final class MainActivity extends Activity {
         value.put("autoConnectOpen", preferences.getBoolean("auto_connect_open", false));
         value.put("autoConnectBoot", preferences.getBoolean("auto_connect_boot", false));
         value.put("killSwitch", preferences.getBoolean("kill_switch", false));
+        value.put("proxyEnabled", CoreConfig.proxyEnabled(preferences));
+        value.put("proxyHttp", preferences.getBoolean("proxy_http", false));
+        value.put("proxySocksPort", String.valueOf(CoreConfig.port(preferences, "proxy_socks_port", 10808)));
+        value.put("proxyHttpPort", String.valueOf(CoreConfig.port(preferences, "proxy_http_port", 10809)));
+        value.put("proxyLan", preferences.getBoolean("proxy_lan", false));
+        value.put("proxyOnly", preferences.getBoolean("proxy_only", false));
+        value.put("proxyUser", preferences.getString("proxy_user", ""));
+        value.put("proxyPass", preferences.getString("proxy_pass", ""));
+        value.put("proxyAddresses", localAddresses());
         value.put("dnsProvider", preferences.getString("dns_provider",
                 doh.isEmpty() ? "cloudflare" : "subscription-doh"));
         value.put("routingMode", preferences.getString("routing_mode", "full"));
@@ -768,7 +786,9 @@ public final class MainActivity extends Activity {
     private static final String[] CORE_KEYS = {
             "dns_provider", "custom_dns", "fragmentation", "routing_mode", "routing_rules",
             "subscription_rules", "geoip_url", "geosite_url", "auto_profiles",
-            "mux", "ip_type", "route_only", "block_udp"};
+            "mux", "ip_type", "route_only", "block_udp",
+            "proxy_enabled", "proxy_http", "proxy_socks_port", "proxy_http_port", "proxy_lan",
+            "proxy_user", "proxy_pass"};
 
     private String signature(String[] keys) {
         Map<String, ?> all = preferences.getAll();
@@ -850,6 +870,7 @@ public final class MainActivity extends Activity {
         Map<String, ?> previous = preferences.getAll();
         String tunBefore = signature(TUN_KEYS);
         String coreBefore = signature(CORE_KEYS);
+        boolean proxyOnlyBefore = CoreConfig.proxyOnly(preferences);
         try {
             JSONObject value = new JSONObject(json);
             SharedPreferences.Editor editor = preferences.edit();
@@ -863,6 +884,16 @@ public final class MainActivity extends Activity {
             editor.putBoolean("auto_connect_open", value.optBoolean("autoConnectOpen", false));
             editor.putBoolean("auto_connect_boot", value.optBoolean("autoConnectBoot", false));
             editor.putBoolean("kill_switch", value.optBoolean("killSwitch", false));
+            boolean proxyEnabled = value.optBoolean("proxyEnabled", false);
+            editor.putBoolean("proxy_enabled", proxyEnabled);
+            editor.putBoolean("proxy_http", value.optBoolean("proxyHttp", false));
+            editor.putString("proxy_socks_port", cleanPort(value.optString("proxySocksPort"), 10808));
+            editor.putString("proxy_http_port", cleanPort(value.optString("proxyHttpPort"), 10809));
+            editor.putBoolean("proxy_lan", value.optBoolean("proxyLan", false));
+            editor.putBoolean("proxy_only", value.optBoolean("proxyOnly", false));
+            if (proxyEnabled && preferences.getString("proxy_pass", "").isEmpty()) {
+                CoreConfig.newProxyCredentials(editor);
+            }
             editor.putString("dns_provider", allowed(value.optString("dnsProvider"),
                     new String[]{"subscription-doh", "cloudflare", "google", "quad9", "custom"}, "cloudflare"));
             editor.putString("custom_dns", value.optString("customDns", "").trim());
@@ -918,7 +949,9 @@ public final class MainActivity extends Activity {
             return;
         }
         boolean connected = ShadowVpnService.connected;
-        boolean reconnect = connected && !tunBefore.equals(signature(TUN_KEYS));
+        // Proxy only and VPN are different kinds of connection; switching needs a reconnect.
+        boolean reconnect = connected && (!tunBefore.equals(signature(TUN_KEYS))
+                || proxyOnlyBefore != CoreConfig.proxyOnly(preferences));
         boolean reload = connected && !reconnect && !coreBefore.equals(signature(CORE_KEYS));
         uiMessage = reconnect ? "Настройки сохранены, переподключаемся"
                 : reload ? "Применяем настройки…" : "Настройки сохранены";
@@ -933,6 +966,46 @@ public final class MainActivity extends Activity {
     }
 
     @SuppressWarnings("unchecked")
+    private static String cleanPort(String value, int fallback) {
+        try {
+            int port = Integer.parseInt(value.trim());
+            if (port >= 1024 && port <= 65535) return String.valueOf(port);
+        } catch (Exception ignored) { }
+        return String.valueOf(fallback);
+    }
+
+    /** The phone's IPv4 addresses on Wi-Fi, hotspot and USB/Ethernet tethering. */
+    private static JSONArray localAddresses() {
+        JSONArray result = new JSONArray();
+        try {
+            for (java.net.NetworkInterface face : java.util.Collections.list(
+                    java.net.NetworkInterface.getNetworkInterfaces())) {
+                if (!face.isUp() || face.isLoopback() || face.getName().startsWith("tun")) continue;
+                if (face.getName().startsWith("rmnet") || face.getName().startsWith("ccmni")) continue;
+                for (java.net.InetAddress address : java.util.Collections.list(face.getInetAddresses())) {
+                    if (address instanceof java.net.Inet4Address && address.isSiteLocalAddress()) {
+                        result.put(address.getHostAddress());
+                    }
+                }
+            }
+        } catch (Exception ignored) { }
+        return result;
+    }
+
+    private void resetProxyCredentials() {
+        SharedPreferences.Editor editor = preferences.edit();
+        CoreConfig.newProxyCredentials(editor);
+        editor.commit();
+        try {
+            CoreConfig.configure(this, preferences);
+            if (ShadowVpnService.connected) reloadCore();
+            uiMessage = "Новые логин и пароль прокси";
+        } catch (Exception error) {
+            uiMessage = cleanError(error);
+        }
+        pushSnapshot();
+    }
+
     private void restorePreferences(Map<String, ?> values) {
         SharedPreferences.Editor editor = preferences.edit().clear();
         for (Map.Entry<String, ?> entry : values.entrySet()) {
@@ -1102,6 +1175,10 @@ public final class MainActivity extends Activity {
         // Opens the app's system page (Battery → Unrestricted is one tap away)
         // instead of asking for REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, which
         // Play Protect treats as a warning sign.
+        @JavascriptInterface public void resetProxyCredentials() {
+            ui.post(MainActivity.this::resetProxyCredentials);
+        }
+
         @JavascriptInterface public void openBatterySettings() {
             ui.post(() -> {
                 try {

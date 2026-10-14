@@ -15,7 +15,7 @@ public final class BootReceiver extends BroadcastReceiver {
         if (preferences.getString("selected_id", "").isEmpty()) return;
         // Without a granted VPN consent there is nobody to show the dialog to;
         // the same is true when another app holds the always-on slot.
-        if (VpnService.prepare(context) != null) return;
+        if (!CoreConfig.proxyOnly(preferences) && VpnService.prepare(context) != null) return;
         if (ShadowVpnService.connected) return;
         context.startForegroundService(new Intent(context, ShadowVpnService.class)
                 .setAction(ShadowVpnService.START));

@@ -57,6 +57,7 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 		Mux:               options.Mux,
 		RouteOnly:         options.RouteOnly,
 		BlockUDP:          options.BlockUDP,
+		LocalProxy:        options.LocalProxy,
 		DNS:               dns,
 		RoutingMode:       routing.Mode,
 		SubscriptionRules: options.SubscriptionRules,
@@ -136,39 +137,47 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 	return config, naive, nil
 }
 
+// detachedInbounds are the listeners of a config that start only once the
+// instance takes over: the TUN, and local proxy ports the previous instance
+// may still hold.
+type detachedInbounds struct {
+	tun   *core.InboundHandlerConfig
+	proxy []*core.InboundHandlerConfig
+}
+
 // startDetached starts an Xray instance from a runtime config without its
-// TUN inbound, which is returned separately. Outbounds, routing and DNS are
+// inbounds, which are returned separately. Outbounds, routing and DNS are
 // live and can be tested before the instance takes over the tunnel.
-func startDetached(config []byte, naive *naiveRuntime) (*core.Instance, *core.InboundHandlerConfig, error) {
+func startDetached(config []byte, naive *naiveRuntime) (*core.Instance, detachedInbounds, error) {
 	parsed, err := core.LoadConfig("json", bytes.NewReader(config))
 	if err != nil {
-		return nil, nil, err
+		return nil, detachedInbounds{}, err
 	}
-	if len(parsed.Inbound) != 1 {
-		return nil, nil, errors.New("Конфигурация Xray должна содержать один TUN")
+	if len(parsed.Inbound) == 0 || parsed.Inbound[0].Tag != "tun-in" {
+		return nil, detachedInbounds{}, errors.New("Конфигурация Xray должна начинаться с TUN")
 	}
-	tun := parsed.Inbound[0]
+	inbounds := detachedInbounds{tun: parsed.Inbound[0], proxy: parsed.Inbound[1:]}
 	parsed.Inbound = nil
 	if naive != nil {
 		if err := naive.Start(); err != nil {
-			return nil, nil, err
+			return nil, detachedInbounds{}, err
 		}
 	}
 	instance, err := core.New(parsed)
 	if err != nil {
-		return nil, nil, err
+		return nil, detachedInbounds{}, err
 	}
 	if naive != nil {
 		if err := naive.Install(instance, "proxy"); err != nil {
 			_ = instance.Close()
-			return nil, nil, err
+			return nil, detachedInbounds{}, err
 		}
 	}
 	if err := instance.Start(); err != nil {
 		_ = instance.Close()
-		return nil, nil, err
+		return nil, detachedInbounds{}, err
 	}
-	return instance, tun, nil
+	return instance, inbounds, nil
 }
 
 // tunEnvMu serializes use of XRAY_TUN_FD, which the TUN inbound reads while
@@ -185,6 +194,22 @@ func attachTun(instance *core.Instance, tun *core.InboundHandlerConfig, fd int) 
 	}
 	defer os.Unsetenv("XRAY_TUN_FD")
 	return core.AddInboundHandler(instance, tun)
+}
+
+// attachInbounds hands the tunnel (unless running as a proxy only, tunFD < 0)
+// and the local proxy ports to a running instance.
+func attachInbounds(instance *core.Instance, inbounds detachedInbounds, tunFD int) error {
+	if tunFD >= 0 {
+		if err := attachTunFunc(instance, inbounds.tun, tunFD); err != nil {
+			return err
+		}
+	}
+	for _, inbound := range inbounds.proxy {
+		if err := core.AddInboundHandler(instance, inbound); err != nil {
+			return fmt.Errorf("Не удалось открыть порт прокси: %v", err)
+		}
+	}
+	return nil
 }
 
 // probeURL answers 204 quickly from everywhere the proxies are likely to be.
@@ -268,7 +293,7 @@ func switchSession(profileID string, reload bool) error {
 	if err != nil {
 		return err
 	}
-	instance, tun, err := startDetached(config, naive)
+	instance, inbounds, err := startDetached(config, naive)
 	if err != nil {
 		closeNaive(naive)
 		return err
@@ -293,7 +318,7 @@ func switchSession(profileID string, reload bool) error {
 	old, oldNaive := mobile.instance, mobile.naive
 	// The old stack must stop reading the fd before the new one starts.
 	_ = old.Close()
-	if err := attachTunFunc(instance, tun, mobile.tunFD); err != nil {
+	if err := attachInbounds(instance, inbounds, mobile.tunFD); err != nil {
 		_ = instance.Close()
 		closeNaive(naive)
 		closeNaive(oldNaive)

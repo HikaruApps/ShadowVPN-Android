@@ -42,7 +42,7 @@ Three layers, all in one process:
    `styles.css`, flag SVGs, `logo.png`). Not native Android views. Opening
    `index.html` in a desktop browser renders mock data (no `window.ShadowVpnAndroid`);
    query params `?disconnected`, `?error`, `?blocked`, `?lite`, `?preview=servers|menu|welcome|settings|
-   subscriptions|logs|connection|tunnel|split|application|about|auto` open specific screens.
+   subscriptions|logs|connection|tunnel|proxy|split|application|about|auto` open specific screens.
    Long lists (servers, apps, Auto servers) are paged in via `lazyList`; the
    `html.lite` class (low RAM/CPU devices) disables shadows and animations.
 2. **Java host** (`app/src/main/java/net/shadownet/shadowvpn/android/`)
@@ -63,19 +63,21 @@ Three layers, all in one process:
 3. **Go core** (`go/bridge/`, Java package `net.shadownet.shadowvpn.core.bridge.Bridge`)
    - Exported gomobile API in `bridge.go`: `SetDataDir`, `SetDeviceSeed`, `DeviceHWID`,
      `LoadCachedProfiles`, `Configure(optionsJSON)`, `ImportSources({"urls","manual"})`,
-     `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `Stop`, `SwitchProfile(profileID)`,
+     `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `StartProxy` (local proxy only, no TUN), `Stop`, `SwitchProfile(profileID)`,
      `Reload`, `PublicIP`, `Logs`. Data
      crosses the boundary as JSON strings; global state lives in the mutex-guarded `mobile`
      struct. Only types gomobile supports may appear in exported signatures.
    - `session.go` keeps the TUN fd across Xray instances: a new instance starts without its
      TUN inbound (`startDetached`), is probed with a real request through it, then the old
-     instance is closed and the TUN inbound attached (`attachTun`). `SwitchProfile`,
+     instance is closed and the TUN and local proxy inbounds attached (`attachInbounds`). `SwitchProfile`,
      `Reload` (network change, Xray-only settings) and the watchdog (rebuilds after
      consecutive failed probes) all use this; a failed probe keeps the current server.
    - Android-only files: `xrayjson.go` (Xray JSON import and sanitizing), `links.go`
      (vmess://, ss://), `android_config.go` (turns the desktop config into the Android
      runtime config: DNS through `dns-out`, rule ordering, subscription rules, dialer
-     chains, GeoData, no local listeners, warning-level log), `cache.go` (profile cache,
+     chains, GeoData, warning-level log; no local listeners unless the opt-in local proxy is on),
+     `local_proxy.go` (SOCKS5/HTTP inbounds that always require a login/password, optional
+     `0.0.0.0` for hotspot clients, TUN rules extended to them, phone loopback blocked), `cache.go` (profile cache,
      GeoData download with codes recorded in `meta.json`).
    - `subscription.go` (share links), `dns.go`, `bootstrap.go`, `auto.go`, `ping.go`,
      `geodata.go`, `identity.go` are shared with the desktop client; prefer keeping them

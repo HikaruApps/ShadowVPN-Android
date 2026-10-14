@@ -75,7 +75,8 @@ type mobileOptions struct {
 	RouteOnly bool   `json:"routeOnly"`
 	BlockUDP  bool   `json:"blockUdp"`
 	// MemoryLimitMB is a soft limit for the Go heap; 0 means none.
-	MemoryLimitMB int `json:"memoryLimitMb"`
+	MemoryLimitMB int        `json:"memoryLimitMb"`
+	LocalProxy    localProxy `json:"localProxy"`
 }
 
 func (options mobileOptions) geoURLs() (string, string) {
@@ -179,6 +180,9 @@ func Configure(raw string) error {
 	}
 	if options.MemoryLimitMB != 0 && (options.MemoryLimitMB < 32 || options.MemoryLimitMB > 1024) {
 		return errors.New("Лимит памяти должен быть от 32 до 1024 МБ")
+	}
+	if err := options.LocalProxy.validate(); err != nil {
+		return err
 	}
 	if _, _, err := selectedDNSWithDoH(options.DNSID, options.CustomDNS, options.DoHURL); err != nil {
 		return err
@@ -458,9 +462,28 @@ func xrayLogPath(directory string) string {
 // The Android app excludes its own UID from the VPN before calling this method,
 // so outbound Xray sockets and bootstrap DNS cannot loop into the tunnel.
 func Start(tunFD int) error {
+	if tunFD < 0 {
+		return errors.New("VPN не подготовлен")
+	}
+	return startPrepared(tunFD)
+}
+
+// StartProxy runs the prepared connection as a local SOCKS5/HTTP proxy only,
+// without a TUN (no VPN in Android, so no VPN icon either).
+func StartProxy() error {
+	mobile.Lock()
+	enabled := mobile.options.LocalProxy.enabled()
+	mobile.Unlock()
+	if !enabled {
+		return errors.New("Включите SOCKS5 или HTTP-прокси")
+	}
+	return startPrepared(-1)
+}
+
+func startPrepared(tunFD int) error {
 	mobile.Lock()
 	defer mobile.Unlock()
-	if tunFD < 0 || mobile.prepared == nil || mobile.instance != nil {
+	if mobile.prepared == nil || mobile.instance != nil {
 		return errors.New("VPN не подготовлен")
 	}
 	if logPath := xrayLogPath(mobile.dataDir); logPath != "" {
@@ -468,9 +491,9 @@ func Start(tunFD int) error {
 	}
 	config, naive := mobile.prepared, mobile.naive
 	mobile.prepared, mobile.naive = nil, nil
-	instance, tun, err := startDetached(config, naive)
+	instance, inbounds, err := startDetached(config, naive)
 	if err == nil {
-		if err = attachTunFunc(instance, tun, tunFD); err != nil {
+		if err = attachInbounds(instance, inbounds, tunFD); err != nil {
 			_ = instance.Close()
 		}
 	}

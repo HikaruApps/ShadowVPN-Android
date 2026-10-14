@@ -15,6 +15,7 @@ type androidRuntimeOptions struct {
 	Mux               bool
 	RouteOnly         bool // sniffed domains route, but connect to the original IP
 	BlockUDP          bool // everything but DNS; apps fall back from QUIC to TCP
+	LocalProxy        localProxy
 	DNS               dnsPreset
 	RoutingMode       string
 	SubscriptionRules bool
@@ -60,10 +61,12 @@ func androidRuntimeConfig(config []byte, options androidRuntimeOptions) ([]byte,
 	delete(settings, "gateway")
 	delete(settings, "dns")
 	settings["mtu"] = options.MTU
-	if sniffing, ok := tun["sniffing"].(map[string]any); ok && options.RouteOnly {
+	sniffing, _ := tun["sniffing"].(map[string]any)
+	if sniffing != nil && options.RouteOnly {
 		sniffing["routeOnly"] = true
 	}
-	document["inbounds"] = []any{tun}
+	// The TUN stays first: sessions attach it separately from the rest.
+	document["inbounds"] = append([]any{tun}, options.LocalProxy.inbounds(sniffing)...)
 
 	// Traffic counters come from Android; per-connection stats and debug
 	// logging only cost CPU and battery.
@@ -147,8 +150,10 @@ func androidRuntimeConfig(config []byte, options androidRuntimeOptions) ([]byte,
 		block := map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "network": "udp", "outboundTag": "block"}
 		rules = append(rules[:1], append([]any{block}, rules[1:]...)...)
 	}
-	routing["rules"] = rules
+	// The loopback guard matches IPs only; it must not make every domain
+	// resolve before routing, so the strategy is decided without it.
 	routing["domainStrategy"] = routingDomainStrategy(rules, options)
+	routing["rules"] = applyLocalProxyRules(rules, options.LocalProxy)
 	document["routing"] = routing
 	return json.Marshal(document)
 }

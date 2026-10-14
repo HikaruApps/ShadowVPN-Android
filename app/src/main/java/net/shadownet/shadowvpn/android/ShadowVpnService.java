@@ -72,7 +72,9 @@ public final class ShadowVpnService extends VpnService {
     private void connect() {
         retryGeneration++;
         SharedPreferences preferences = CoreConfig.preferences(this);
-        boolean killSwitch = preferences.getBoolean("kill_switch", false);
+        boolean proxyOnly = CoreConfig.proxyOnly(preferences);
+        // Without a TUN there is nothing a Kill Switch could hold.
+        boolean killSwitch = !proxyOnly && preferences.getBoolean("kill_switch", false);
         if (killSwitch) addLog("Kill Switch включён: TUN поднимается до подготовки сервера");
         if (killSwitch) {
             // Keep the TUN that may already hold traffic; only the core goes.
@@ -94,14 +96,19 @@ public final class ShadowVpnService extends VpnService {
             if (killSwitch) establishTunnel(preferences);
             addLog("Подготовка " + (profileId.startsWith(AUTO_PREFIX) ? "Auto" : "профиля " + profileId));
             Bridge.prepare(profileId);
-            if (!killSwitch) establishTunnel(preferences);
-            Bridge.start(tunnel.getFd());
+            if (proxyOnly) {
+                Bridge.startProxy();
+            } else {
+                if (!killSwitch) establishTunnel(preferences);
+                Bridge.start(tunnel.getFd());
+            }
             connected = true;
             blocked = false;
             retryAttempt = 0;
             status = "Подключено";
-            addLog("Xray запущен");
-            updateNotification("VPN подключён");
+            addLog(proxyOnly ? "Xray запущен как локальный прокси, без VPN" : "Xray запущен");
+            updateNotification(proxyOnly ? "Прокси 127.0.0.1:"
+                    + CoreConfig.port(preferences, "proxy_socks_port", 10808) : "VPN подключён");
             watchNetwork();
         } catch (Exception error) {
             status = "Ошибка: " + (error.getMessage() == null
