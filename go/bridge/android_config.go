@@ -158,7 +158,15 @@ func androidRuntimeConfig(config []byte, options androidRuntimeOptions) ([]byte,
 func androidDNSConfig(preset dnsPreset, ipv6 bool, ipType string) map[string]any {
 	servers := []string{}
 	if preset.DoHURL != "" {
-		servers = append(servers, preset.DoHURL)
+		// One DoH connection serves every query; while it is being
+		// re-established after the server or proxy closed it, queries fail.
+		// A plain TCP resolver of another provider answers meanwhile, also
+		// through the proxy.
+		fallback := "tcp://1.1.1.1"
+		if strings.Contains(preset.DoHURL, "1.1.1.1") || strings.Contains(preset.DoHURL, "cloudflare") {
+			fallback = "tcp://8.8.8.8"
+		}
+		servers = append(servers, preset.DoHURL, fallback)
 	} else {
 		for _, server := range preset.Servers {
 			address, err := netip.ParseAddr(server)

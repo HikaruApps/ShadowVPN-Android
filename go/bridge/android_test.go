@@ -814,3 +814,40 @@ func TestAndroidTunnelOptionsLoadInXray(t *testing.T) {
 		t.Fatalf("memory limit not cleared: %d", limit)
 	}
 }
+
+func TestAndroidDNSFallsBackFromDoH(t *testing.T) {
+	for doh, fallback := range map[string]string{
+		"https://dns.example.com/dns-query":    "tcp://1.1.1.1",
+		"https://1.1.1.1/dns-query":            "tcp://8.8.8.8",
+		"https://cloudflare-dns.com/dns-query": "tcp://8.8.8.8",
+	} {
+		servers := androidDNSConfig(dnsPreset{DoHURL: doh}, false, "")["servers"].([]string)
+		if len(servers) != 2 || servers[0] != doh || servers[1] != fallback {
+			t.Fatalf("%s: servers = %v", doh, servers)
+		}
+	}
+	// The fallback must load in Xray next to a DoH server.
+	profile := mustProfile(t, "trojan://pass@198.51.100.7:443?security=tls&sni=t.example#Trojan")
+	_, dns, _ := selectedDNSWithDoH("subscription-doh", nil, "https://dns.example.com/dns-query")
+	routing, _ := newRoutingOptions("full", nil, "", "")
+	config, err := makeConfigWithRoutingAndDoH(profile, "subscription-doh", nil, "https://dns.example.com/dns-query", false, "", routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := androidRuntimeConfig(config, androidRuntimeOptions{DNS: dns, RoutingMode: "full", Profiles: []Profile{profile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "tcp://1.1.1.1") {
+		t.Fatalf("fallback missing: %s", encoded)
+	}
+	parsed, err := core.LoadConfig("json", bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := core.New(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = instance.Close()
+}
