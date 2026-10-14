@@ -8,7 +8,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.Network;
-import android.net.NetworkCapabilities;
 import android.net.VpnService;
 import android.os.ParcelFileDescriptor;
 
@@ -37,9 +36,12 @@ public final class ShadowVpnService extends VpnService {
     private static final String[] LAN_V6 = {"fc00::/7", "fe80::/10", "ff00::/8"};
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    // Live reloads must not wait behind (or block) connect and stop.
+    private final ExecutorService reloadExecutor = Executors.newSingleThreadExecutor();
     private ParcelFileDescriptor tunnel;
     private ConnectivityManager.NetworkCallback networkCallback;
-    private volatile int lastTransport = -2;
+    private volatile Network lastNetwork;
+    private volatile long networkChange;
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
@@ -105,7 +107,7 @@ public final class ShadowVpnService extends VpnService {
             status = "Подключено";
             addLog("Xray запущен");
             updateNotification("VPN подключён");
-            watchNetwork(profileId.startsWith(AUTO_PREFIX) && CoreConfig.preferredSource(this, preferences) >= 0);
+            watchNetwork();
         } catch (Exception error) {
             status = "Ошибка: " + (error.getMessage() == null
                     ? "не удалось подключиться" : error.getMessage());
@@ -117,27 +119,49 @@ public final class ShadowVpnService extends VpnService {
     }
 
     /**
-     * Auto with separate Wi-Fi and mobile subscriptions must switch server
-     * sets when the phone changes networks.
+     * When the phone moves to another network (Wi-Fi to mobile, a new Wi-Fi),
+     * the proxy's sockets stay bound to the old one and the tunnel stalls.
+     * The core then rebuilds the connection over the new network without
+     * closing the TUN; Auto also re-picks the subscription for that network.
      */
-    private void watchNetwork(boolean enabled) {
+    private void watchNetwork() {
         unwatchNetwork();
-        if (!enabled) return;
         ConnectivityManager manager = getSystemService(ConnectivityManager.class);
-        lastTransport = CoreConfig.currentTransport(this);
+        lastNetwork = null;
         networkCallback = new ConnectivityManager.NetworkCallback() {
-            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
-                int transport = CoreConfig.currentTransport(ShadowVpnService.this);
-                if (transport < 0 || transport == lastTransport) return;
-                lastTransport = transport;
-                addLog("Сеть изменилась, переподключение Auto");
-                executor.execute(ShadowVpnService.this::connect);
+            @Override public void onAvailable(Network network) {
+                Network previous = lastNetwork;
+                lastNetwork = network;
+                // The first callback reports the network we connected on.
+                if (previous == null || previous.equals(network)) return;
+                long change = ++networkChange;
+                reloadExecutor.execute(() -> reloadAfterNetworkChange(change));
             }
         };
         try {
             manager.registerDefaultNetworkCallback(networkCallback);
         } catch (Exception error) {
             networkCallback = null;
+        }
+    }
+
+    private void reloadAfterNetworkChange(long change) {
+        try {
+            // Let the new network settle; a newer change supersedes this one.
+            Thread.sleep(1500);
+        } catch (InterruptedException interrupted) {
+            return;
+        }
+        if (change != networkChange || !connected) return;
+        addLog("Сеть изменилась, обновляем соединение без разрыва VPN");
+        try {
+            CoreConfig.configure(this, CoreConfig.preferences(this));
+            Bridge.reload();
+            addLog("Соединение обновлено");
+        } catch (Exception error) {
+            String message = error.getMessage() == null ? "неизвестная ошибка" : error.getMessage();
+            addLog("Не удалось обновить соединение: " + message);
+            if (message.startsWith("Туннель потерян")) executor.execute(this::connect);
         }
     }
 
@@ -313,6 +337,7 @@ public final class ShadowVpnService extends VpnService {
     @Override public void onDestroy() {
         executor.execute(() -> closeTunnel(true));
         executor.shutdown();
+        reloadExecutor.shutdownNow();
         super.onDestroy();
     }
 }

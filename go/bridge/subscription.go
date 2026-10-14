@@ -480,8 +480,23 @@ func parseURI(raw string) (Profile, error) {
 		return newProfile(u.Fragment, out), nil
 	}
 	if u.Scheme == "hysteria2" || u.Scheme == "hy2" {
-		if q.Get("obfs") != "" || q.Get("obfs-password") != "" {
-			return Profile{}, errors.New("Hysteria2 obfs пока не поддерживается")
+		// Hysteria2 obfuscation maps to Xray's salamander UDP mask.
+		var obfs map[string]any
+		switch obfsType := strings.ToLower(strings.TrimSpace(q.Get("obfs"))); obfsType {
+		case "", "none":
+			if q.Get("obfs-password") != "" {
+				return Profile{}, errors.New("Hysteria2: obfs-password задан без obfs")
+			}
+		case "salamander":
+			obfsPassword := q.Get("obfs-password")
+			if obfsPassword == "" {
+				return Profile{}, errors.New("Hysteria2 salamander требует obfs-password")
+			}
+			obfs = map[string]any{"udp": []any{map[string]any{
+				"type": "salamander", "settings": map[string]any{"password": obfsPassword},
+			}}}
+		default:
+			return Profile{}, fmt.Errorf("Hysteria2 obfs %s не поддерживается", obfsType)
 		}
 		password := u.User.Username()
 		if suffix, exists := u.User.Password(); exists {
@@ -518,6 +533,9 @@ func parseURI(raw string) (Profile, error) {
 			"security":         "tls",
 			"tlsSettings":      tlsSettings,
 			"hysteriaSettings": map[string]any{"version": 2, "auth": password},
+		}
+		if obfs != nil {
+			stream["finalmask"] = obfs
 		}
 		out := map[string]any{
 			"tag":            "proxy",
@@ -818,17 +836,20 @@ func configuredOutbound(p Profile, tag string, fragmentation bool) (map[string]a
 			stream = map[string]any{}
 			outbound["streamSettings"] = stream
 		}
-		stream["finalmask"] = map[string]any{
-			"tcp": []any{map[string]any{
-				"type": "fragment",
-				"settings": map[string]any{
-					"packets":  "tlshello",
-					"length":   "10-35",
-					"delay":    "0-1",
-					"maxSplit": "3-5",
-				},
-			}},
+		mask, _ := stream["finalmask"].(map[string]any)
+		if mask == nil {
+			mask = map[string]any{}
+			stream["finalmask"] = mask
 		}
+		mask["tcp"] = []any{map[string]any{
+			"type": "fragment",
+			"settings": map[string]any{
+				"packets":  "tlshello",
+				"length":   "10-35",
+				"delay":    "0-1",
+				"maxSplit": "3-5",
+			},
+		}}
 	}
 	return outbound, nil
 }

@@ -65,6 +65,10 @@ public final class MainActivity extends Activity {
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService appWorker = Executors.newSingleThreadExecutor();
+    // Server switches and live reloads run apart from imports and pings,
+    // which can take tens of seconds.
+    private final ExecutorService switchWorker = Executors.newSingleThreadExecutor();
+    private String switchingTo = "";
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final List<ServerItem> servers = new ArrayList<>();
     private final List<SubscriptionInfo> subscriptionInfo = new ArrayList<>();
@@ -192,6 +196,7 @@ public final class MainActivity extends Activity {
         webReady = false;
         worker.shutdownNow();
         appWorker.shutdownNow();
+        switchWorker.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("ShadowVpnAndroid");
             webView.destroy();
@@ -624,6 +629,7 @@ public final class MainActivity extends Activity {
                     : connecting ? "connecting"
                     : ShadowVpnService.status.startsWith("Ошибка") ? "error" : "disconnected";
             root.put("state", state);
+            root.put("switchingTo", switchingTo);
             root.put("serviceStatus", ShadowVpnService.status);
             root.put("message", uiMessage);
             root.put("publicIp", connected ? maskIp(publicIp) : publicIp);
@@ -700,21 +706,94 @@ public final class MainActivity extends Activity {
         return value;
     }
 
-    private static final String[] RUNTIME_KEYS = {
-            "dns_provider", "custom_dns", "fragmentation", "tun_mtu", "ipv6_enabled", "lan_direct",
-            "routing_mode", "routing_rules", "subscription_rules", "geoip_url", "geosite_url",
-            "app_routing_mode", "app_routing_packages", "auto_profiles"};
+    // Settings Android applies to the TUN itself need a new VpnService
+    // interface; the rest only changes Xray and is applied without a drop.
+    private static final String[] TUN_KEYS = {
+            "tun_mtu", "ipv6_enabled", "lan_direct", "app_routing_mode", "app_routing_packages"};
+    private static final String[] CORE_KEYS = {
+            "dns_provider", "custom_dns", "fragmentation", "routing_mode", "routing_rules",
+            "subscription_rules", "geoip_url", "geosite_url", "auto_profiles"};
 
-    private String runtimeSignature() {
+    private String signature(String[] keys) {
         Map<String, ?> all = preferences.getAll();
         StringBuilder signature = new StringBuilder();
-        for (String key : RUNTIME_KEYS) signature.append(key).append('=').append(all.get(key)).append('\n');
+        for (String key : keys) signature.append(key).append('=').append(all.get(key)).append('\n');
         return signature.toString();
+    }
+
+    /**
+     * Moves the running tunnel to another server without closing it. The core
+     * connects and tests the new server first; if that fails, traffic stays
+     * on the current one and the selection is not changed.
+     */
+    private void switchServer(ServerItem target) {
+        if (!switchingTo.isEmpty()) {
+            uiMessage = "Подождите, сервер уже переключается";
+            pushSnapshot();
+            return;
+        }
+        switchingTo = target.id;
+        uiMessage = "";
+        pushSnapshot();
+        ShadowVpnService.addLog("Переключение на " + target.name);
+        switchWorker.execute(() -> {
+            String failure = null;
+            try {
+                CoreConfig.configure(this, preferences);
+                Bridge.switchProfile(target.id);
+            } catch (Exception error) {
+                failure = cleanError(error);
+            }
+            final String result = failure;
+            ui.post(() -> {
+                switchingTo = "";
+                if (result == null) {
+                    selectedId = target.id;
+                    preferences.edit().putString("selected_id", target.id).apply();
+                    uiMessage = "Сервер переключён";
+                    ShadowVpnService.addLog("Сервер переключён без разрыва VPN");
+                    refreshVpnIp();
+                } else {
+                    uiMessage = result;
+                    ShadowVpnService.addLog("Переключение не удалось: " + result);
+                    // The core gave up the tunnel; bring the current server back.
+                    if (result.startsWith("Туннель потерян")) startSelectedServer();
+                }
+                pushSnapshot();
+            });
+        });
+    }
+
+    /** Applies Xray-only settings to the running tunnel without reconnecting. */
+    private void reloadCore() {
+        switchWorker.execute(() -> {
+            String failure = null;
+            try {
+                Bridge.reload();
+            } catch (Exception error) {
+                failure = cleanError(error);
+            }
+            final String result = failure;
+            ui.post(() -> {
+                uiMessage = result == null ? "Настройки применены без переподключения"
+                        : "Настройки сохранены, но не применены: " + result;
+                if (result == null) refreshVpnIp();
+                else if (result.startsWith("Туннель потерян")) startSelectedServer();
+                pushSnapshot();
+            });
+        });
+    }
+
+    private void refreshVpnIp() {
+        publicIp = "";
+        ipRequestMode = -1;
+        fetchPublicIp(true);
     }
 
     private void saveSettings(String json) {
         Map<String, ?> previous = preferences.getAll();
-        String before = runtimeSignature();
+        String tunBefore = signature(TUN_KEYS);
+        String coreBefore = signature(CORE_KEYS);
         try {
             JSONObject value = new JSONObject(json);
             SharedPreferences.Editor editor = preferences.edit();
@@ -764,10 +843,14 @@ public final class MainActivity extends Activity {
             pushSnapshot();
             return;
         }
-        boolean reconnect = ShadowVpnService.connected && !before.equals(runtimeSignature());
-        uiMessage = reconnect ? "Настройки сохранены, переподключаемся" : "Настройки сохранены";
+        boolean connected = ShadowVpnService.connected;
+        boolean reconnect = connected && !tunBefore.equals(signature(TUN_KEYS));
+        boolean reload = connected && !reconnect && !coreBefore.equals(signature(CORE_KEYS));
+        uiMessage = reconnect ? "Настройки сохранены, переподключаемся"
+                : reload ? "Применяем настройки…" : "Настройки сохранены";
         pushSnapshot();
         if (reconnect) startSelectedServer();
+        else if (reload) reloadCore();
     }
 
     @SuppressWarnings("unchecked")
@@ -805,6 +888,10 @@ public final class MainActivity extends Activity {
             ui.post(() -> {
                 for (ServerItem server : servers) {
                     if (server.id.equals(id)) {
+                        if (ShadowVpnService.connected && !id.equals(selectedId)) {
+                            switchServer(server);
+                            return;
+                        }
                         selectedId = id;
                         preferences.edit().putString("selected_id", id).apply();
                         uiMessage = "";
