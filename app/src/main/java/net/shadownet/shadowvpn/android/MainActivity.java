@@ -82,6 +82,7 @@ public final class MainActivity extends Activity {
     private boolean webReady;
     private String lastRuntimeSnapshot = "";
     private boolean importRunning;
+    private boolean launchUpdateDone;
     private boolean pingRunning;
     private boolean wasConnected;
     private String selectedId = "";
@@ -240,13 +241,28 @@ public final class MainActivity extends Activity {
                     try { applyServers(parseServers(new JSONObject(result))); }
                     catch (Exception ignored) { }
                 }
-                if (servers.isEmpty() && hasSources()) importSubscriptions(false);
+                boolean refresh = hasSources() && (servers.isEmpty()
+                        || !launchUpdateDone && preferences.getBoolean("update_on_open", false));
+                launchUpdateDone = true;
+                if (refresh) importSubscriptions(false);
                 else {
                     fetchPublicIp(ShadowVpnService.connected);
                     if (preferences.getBoolean("ping_on_open", false)) runPings();
                 }
             });
         });
+    }
+
+    private static Set<String> serverIds(List<ServerItem> list) {
+        Set<String> ids = new HashSet<>();
+        for (ServerItem server : list) if (!server.auto) ids.add(server.id);
+        return ids;
+    }
+
+    /** Older versions pinged after every import when "ping on open" was on. */
+    private boolean pingAfterUpdate() {
+        return preferences.getBoolean("ping_after_update",
+                preferences.getBoolean("ping_on_open", false));
     }
 
     private boolean hasSources() {
@@ -296,7 +312,10 @@ public final class MainActivity extends Activity {
         try {
             request.put("urls", subscriptionUrls());
             request.put("manual", manualConfigs());
+            request.put("sendHwid", preferences.getBoolean("send_hwid", true));
         } catch (Exception ignored) { }
+        boolean notify = !userInitiated && preferences.getBoolean("notify_updates", false);
+        Set<String> before = serverIds(servers);
         importRunning = true;
         if (userInitiated) uiMessage = "Обновляем подписку…";
         pushSnapshot();
@@ -322,13 +341,15 @@ public final class MainActivity extends Activity {
                     preferences.edit().putLong("last_sync", System.currentTimeMillis()).apply();
                     applyServers(parsed);
                     fetchPublicIp(ShadowVpnService.connected);
-                    if (preferences.getBoolean("ping_on_open", false)) runPings();
+                    if (pingAfterUpdate()) runPings();
+                    if (notify) UpdateNotifier.notify(this, before, serverIds(parsed), null);
                 });
             } catch (Exception error) {
                 ui.post(() -> {
                     importRunning = false;
                     uiMessage = "Не удалось обновить · " + cleanError(error);
                     pushSnapshot();
+                    if (notify) UpdateNotifier.notify(this, before, before, cleanError(error));
                 });
             }
         });
@@ -683,6 +704,10 @@ public final class MainActivity extends Activity {
         JSONObject value = new JSONObject();
         value.put("autoUpdate", preferences.getString("auto_update", "1440"));
         value.put("pingOnOpen", preferences.getBoolean("ping_on_open", false));
+        value.put("updateOnOpen", preferences.getBoolean("update_on_open", false));
+        value.put("pingAfterUpdate", pingAfterUpdate());
+        value.put("notifyUpdates", preferences.getBoolean("notify_updates", false));
+        value.put("sendHwid", preferences.getBoolean("send_hwid", true));
         value.put("dnsProvider", preferences.getString("dns_provider",
                 doh.isEmpty() ? "cloudflare" : "subscription-doh"));
         value.put("routingMode", preferences.getString("routing_mode", "full"));
@@ -800,6 +825,10 @@ public final class MainActivity extends Activity {
             editor.putString("auto_update", allowed(value.optString("autoUpdate"),
                     new String[]{"15", "60", "360", "1440", "off"}, "1440"));
             editor.putBoolean("ping_on_open", value.optBoolean("pingOnOpen", false));
+            editor.putBoolean("update_on_open", value.optBoolean("updateOnOpen", false));
+            editor.putBoolean("ping_after_update", value.optBoolean("pingAfterUpdate", pingAfterUpdate()));
+            editor.putBoolean("notify_updates", value.optBoolean("notifyUpdates", false));
+            editor.putBoolean("send_hwid", value.optBoolean("sendHwid", true));
             editor.putString("dns_provider", allowed(value.optString("dnsProvider"),
                     new String[]{"subscription-doh", "cloudflare", "google", "quad9", "custom"}, "cloudflare"));
             editor.putString("custom_dns", value.optString("customDns", "").trim());
@@ -849,6 +878,11 @@ public final class MainActivity extends Activity {
         uiMessage = reconnect ? "Настройки сохранены, переподключаемся"
                 : reload ? "Применяем настройки…" : "Настройки сохранены";
         pushSnapshot();
+        if (preferences.getBoolean("notify_updates", false) && Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 102);
+        }
         if (reconnect) startSelectedServer();
         else if (reload) reloadCore();
     }

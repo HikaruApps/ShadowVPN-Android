@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	xraynet "github.com/xtls/xray-core/common/net"
@@ -230,7 +231,13 @@ func ImportSubscriptions(addressesJSON string) (string, error) {
 type importSources struct {
 	URLs   []string `json:"urls"`
 	Manual string   `json:"manual"`
+	// SendHWID set to false omits the X-Hwid header from subscription
+	// requests. Missing means true, as before the option existed.
+	SendHWID *bool `json:"sendHwid"`
 }
+
+// hideHWID is read while subscriptions download; imports never overlap.
+var hideHWID atomic.Bool
 
 // ImportSources downloads subscription URLs and parses manually added
 // configs (Xray JSON or share links), merging them into one server list.
@@ -257,6 +264,7 @@ func ImportSources(sourcesJSON string) (string, error) {
 	}
 	mobile.importing = true
 	directory := mobile.dataDir
+	hideHWID.Store(sources.SendHWID != nil && !*sources.SendHWID)
 	mobile.Unlock()
 	defer func() { mobile.Lock(); mobile.importing = false; mobile.Unlock() }()
 

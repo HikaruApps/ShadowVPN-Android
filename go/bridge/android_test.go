@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -679,5 +681,43 @@ func TestHysteria2SalamanderObfs(t *testing.T) {
 	}
 	if masked.outbound["streamSettings"].(map[string]any)["finalmask"].(map[string]any)["tcp"] != nil {
 		t.Fatal("fragmentation must not modify the stored profile")
+	}
+}
+
+func TestImportSourcesCanOmitHWID(t *testing.T) {
+	if err := SetDataDir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	SetDeviceSeed("test-device")
+	headers := make(chan http.Header, 4)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Clone()
+		fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte("trojan://pass@198.51.100.7:443?security=tls&sni=t.example#Trojan\n")))
+	}))
+	defer server.Close()
+	// Without a running tunnel subscriptions use the default transport.
+	previous := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	defer func() { http.DefaultTransport = previous }()
+
+	for _, test := range []struct {
+		payload map[string]any
+		want    bool
+	}{
+		{map[string]any{"urls": []string{server.URL}}, true},
+		{map[string]any{"urls": []string{server.URL}, "sendHwid": true}, true},
+		{map[string]any{"urls": []string{server.URL}, "sendHwid": false}, false},
+	} {
+		payload, _ := json.Marshal(test.payload)
+		if _, err := ImportSources(string(payload)); err != nil {
+			t.Fatal(err)
+		}
+		got := <-headers
+		if (got.Get("X-Hwid") != "") != test.want {
+			t.Fatalf("%v: X-Hwid = %q", test.payload, got.Get("X-Hwid"))
+		}
+		if got.Get("User-Agent") != appUserAgent || got.Get("X-Device-Os") == "" {
+			t.Fatalf("other identity headers must stay: %v", got)
+		}
 	}
 }

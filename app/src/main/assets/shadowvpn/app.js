@@ -696,11 +696,11 @@
     const body = page("Настройки");
     body.append(
       group(null,
-        navRow("servers", "Серверы", "Подписки и автовыбор", buildServerSettings),
+        navRow("servers", "Серверы", "Подписки, обновление и автовыбор", buildServerSettings),
         navRow("connection", "Соединение", "DNS, MTU, IPv6 и локальная сеть", buildConnectionSettings),
         navRow("routing", "Маршрутизация", "Что идёт через VPN, а что напрямую", buildRoutingSettings),
         navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling),
-        navRow("application", "Приложение", "Фоновая работа и обновления", buildApplicationSettings)),
+        navRow("application", "Приложение", "Фоновая работа", buildApplicationSettings)),
       group(null,
         navRow("logs", "Логи", null, () => buildLogs(true)),
         navRow("about", "О приложении", `Версия ${snapshot.appVersion || "—"}`, buildAbout)));
@@ -710,11 +710,23 @@
     const body = page("Серверы", buildSettings);
     const s = snapshot.settings || {};
     const sourceCount = [snapshot.subscriptions?.wifi, snapshot.subscriptions?.lte].filter(Boolean).length;
+    const autoUpdate = selectControl([["15","Каждые 15 минут"],["60","Каждый час"],["360","Каждые 6 часов"],["1440","Раз в сутки"],["off","Выключено"]], s.autoUpdate);
+    const updateOnOpen = switchControl(!!s.updateOnOpen);
+    const notifyUpdates = switchControl(!!s.notifyUpdates);
+    const sendHwid = switchControl(s.sendHwid !== false);
     const pingOnOpen = switchControl(!!s.pingOnOpen);
+    const pingAfterUpdate = switchControl(!!s.pingAfterUpdate);
     body.append(group("Подписки",
       row("Источники", `Настроено ${sourceCount} из 2`,
         button("Изменить", "secondary", () => buildSubscriptions(true), true)),
-      row("Проверять задержку", "После загрузки списка серверов", pingOnOpen)));
+      row("Отправлять HWID", "Без него панель может не выдать подписку", sendHwid)));
+    body.append(group("Обновление",
+      row("Автообновление", "Не прерывает активное подключение", autoUpdate),
+      row("Обновлять при запуске", "Загружать подписку при открытии приложения", updateOnOpen),
+      row("Уведомлять об обновлениях", "Сколько серверов добавилось и пропало", notifyUpdates)));
+    body.append(group("Проверка задержки",
+      row("При запуске", "Для сохранённого списка серверов", pingOnOpen),
+      row("После обновления", "Когда подписка загружена заново", pingAfterUpdate)));
 
     const servers = snapshot.servers.filter(server => !server.auto);
     const saved = new Set(s.autoProfiles || []);
@@ -734,7 +746,12 @@
       return label;
     }, panelBody, 40);
     body.append(saveActions(() => ({
+      autoUpdate: autoUpdate.value,
+      updateOnOpen: isOn(updateOnOpen),
+      notifyUpdates: isOn(notifyUpdates),
+      sendHwid: isOn(sendHwid),
       pingOnOpen: isOn(pingOnOpen),
+      pingAfterUpdate: isOn(pingAfterUpdate),
       autoProfiles: chosen.size === servers.length ? [] : servers.filter(server => chosen.has(server.id)).map(server => server.id)
     })));
   }
@@ -956,9 +973,6 @@
     };
     refreshBattery(!!s.batteryUnrestricted);
     body.append(group("Фоновая работа", battery));
-    const autoUpdate = selectControl([["15","Каждые 15 минут"],["60","Каждый час"],["360","Каждые 6 часов"],["1440","Раз в сутки"],["off","Выключено"]], s.autoUpdate);
-    body.append(group("Подписка", row("Автообновление", "Не прерывает активное подключение", autoUpdate)));
-    body.append(saveActions(() => ({ autoUpdate: autoUpdate.value })));
   }
 
   function buildAbout() {
@@ -1111,7 +1125,7 @@
     selected:{...mockServers[1],subscription:{title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000}},
     servers:mockServers,
     subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
-    settings:{autoUpdate:"1440",pingOnOpen:true,dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
+    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
   });
   if (params.has("disconnected")) render({ state:"disconnected", serviceStatus:"", publicIp:"85.95.178.108", session:"" });
   if (params.has("error")) render({ state:"error", serviceStatus:"Ошибка: не удалось подключиться к серверу", publicIp:"85.95.178.108" });
