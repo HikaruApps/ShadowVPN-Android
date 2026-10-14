@@ -734,6 +734,11 @@ public final class MainActivity extends Activity {
         value.put("routingRules", preferences.getString("routing_rules", ""));
         value.put("pingMethod", preferences.getString("ping_method", "tcp"));
         value.put("fragmentation", preferences.getBoolean("fragmentation", false));
+        value.put("mux", preferences.getBoolean("mux", false));
+        value.put("ipType", preferences.getString("ip_type", "auto"));
+        value.put("routeOnly", preferences.getBoolean("route_only", false));
+        value.put("blockUdp", preferences.getBoolean("block_udp", false));
+        value.put("memoryLimit", preferences.getString("memory_limit", "0"));
         value.put("tunMtu", preferences.getString("tun_mtu", "1400"));
         value.put("ipv6Enabled", preferences.getBoolean("ipv6_enabled", false));
         value.put("lanDirect", preferences.getBoolean("lan_direct", true));
@@ -757,7 +762,8 @@ public final class MainActivity extends Activity {
             "tun_mtu", "ipv6_enabled", "lan_direct", "app_routing_mode", "app_routing_packages"};
     private static final String[] CORE_KEYS = {
             "dns_provider", "custom_dns", "fragmentation", "routing_mode", "routing_rules",
-            "subscription_rules", "geoip_url", "geosite_url", "auto_profiles"};
+            "subscription_rules", "geoip_url", "geosite_url", "auto_profiles",
+            "mux", "ip_type", "route_only", "block_udp"};
 
     private String signature(String[] keys) {
         Map<String, ?> all = preferences.getAll();
@@ -859,6 +865,16 @@ public final class MainActivity extends Activity {
             editor.putString("ping_method", allowed(value.optString("pingMethod"),
                     new String[]{"tcp", "head", "get"}, "tcp"));
             editor.putBoolean("fragmentation", value.optBoolean("fragmentation", false));
+            editor.putBoolean("mux", value.optBoolean("mux", false));
+            String ipType = allowed(value.optString("ipType"),
+                    new String[]{"auto", "ipv4", "ipv6"}, "auto");
+            // Turning IPv6 off must not leave the core asking for IPv6 only.
+            if ("ipv6".equals(ipType) && !value.optBoolean("ipv6Enabled", false)) ipType = "auto";
+            editor.putString("ip_type", ipType);
+            editor.putBoolean("route_only", value.optBoolean("routeOnly", false));
+            editor.putBoolean("block_udp", value.optBoolean("blockUdp", false));
+            editor.putString("memory_limit", allowed(value.optString("memoryLimit"),
+                    new String[]{"0", "40", "60", "80", "100", "150"}, "0"));
             editor.putString("tun_mtu", allowed(value.optString("tunMtu"),
                     new String[]{"1280", "1360", "1400", "1500"}, "1400"));
             editor.putBoolean("ipv6_enabled", value.optBoolean("ipv6Enabled", false));

@@ -53,6 +53,10 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 	runtime := androidRuntimeOptions{
 		MTU:               options.TunMTU,
 		IPv6:              options.IPv6,
+		IPType:            options.IPType,
+		Mux:               options.Mux,
+		RouteOnly:         options.RouteOnly,
+		BlockUDP:          options.BlockUDP,
 		DNS:               dns,
 		RoutingMode:       routing.Mode,
 		SubscriptionRules: options.SubscriptionRules,

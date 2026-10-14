@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -719,5 +721,96 @@ func TestImportSourcesCanOmitHWID(t *testing.T) {
 		if got.Get("User-Agent") != appUserAgent || got.Get("X-Device-Os") == "" {
 			t.Fatalf("other identity headers must stay: %v", got)
 		}
+	}
+}
+
+func TestAndroidTunnelOptionsLoadInXray(t *testing.T) {
+	_, dns, _ := selectedDNSWithDoH("cloudflare", nil, "")
+	routing, _ := newRoutingOptions("full", nil, "", "")
+	options := androidRuntimeOptions{DNS: dns, RoutingMode: "full", IPv6: true, IPType: "ipv6", Mux: true, RouteOnly: true, BlockUDP: true}
+	for _, test := range []struct {
+		link string
+		mux  bool
+	}{
+		{"trojan://pass@198.51.100.7:443?security=tls&sni=t.example#Trojan", true},
+		{"vless://11111111-2222-3333-4444-555555555555@198.51.100.8:443?security=tls&sni=v.example&type=ws&path=%2Fws#WS", true},
+		{"vless://11111111-2222-3333-4444-555555555555@198.51.100.9:443?security=reality&sni=www.example.org&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0&sid=ab&flow=xtls-rprx-vision#Vision", false},
+		{"vless://11111111-2222-3333-4444-555555555555@198.51.100.10:443?security=tls&sni=x.example&type=xhttp&path=%2Fx#XHTTP", false},
+		{"hy2://pass@198.51.100.11:443?sni=h.example#HY2", false},
+	} {
+		profile := mustProfile(t, test.link)
+		config, err := makeConfigWithRoutingAndDoH(profile, "cloudflare", nil, "", false, "", routing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		options.Profiles = []Profile{profile}
+		encoded, err := androidRuntimeConfig(config, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := core.LoadConfig("json", bytes.NewReader(encoded))
+		if err != nil {
+			t.Fatalf("%s: Xray rejected the config: %v\n%s", profile.Name, err, encoded)
+		}
+		instance, err := core.New(parsed)
+		if err != nil {
+			t.Fatalf("%s: Xray could not build the config: %v", profile.Name, err)
+		}
+		_ = instance.Close()
+
+		var document struct {
+			Inbounds  []map[string]any `json:"inbounds"`
+			Outbounds []map[string]any `json:"outbounds"`
+			DNS       map[string]any   `json:"dns"`
+			Routing   struct {
+				Rules []map[string]any `json:"rules"`
+			} `json:"routing"`
+		}
+		_ = json.Unmarshal(encoded, &document)
+		var proxy map[string]any
+		for _, outbound := range document.Outbounds {
+			if outbound["tag"] == "proxy" {
+				proxy = outbound
+			}
+		}
+		if (proxy["mux"] != nil) != test.mux {
+			t.Fatalf("%s: mux = %v, want %v", profile.Name, proxy["mux"], test.mux)
+		}
+		if document.Inbounds[0]["sniffing"].(map[string]any)["routeOnly"] != true {
+			t.Fatalf("%s: routeOnly not set", profile.Name)
+		}
+		if document.DNS["queryStrategy"] != "UseIPv6" {
+			t.Fatalf("%s: IP type not applied: %v", profile.Name, document.DNS)
+		}
+		rules := document.Routing.Rules
+		if rules[0]["outboundTag"] != "dns-out" || rules[1]["network"] != "udp" || rules[1]["outboundTag"] != "block" {
+			t.Fatalf("%s: UDP block must follow the DNS rule: %v", profile.Name, rules[:2])
+		}
+	}
+
+	// Defaults change nothing.
+	if strategy := androidDNSConfig(dns, true, "")["queryStrategy"]; strategy != "UseIP" {
+		t.Fatalf("auto with IPv6 must keep UseIP, got %v", strategy)
+	}
+	if strategy := androidDNSConfig(dns, true, "ipv4")["queryStrategy"]; strategy != "UseIPv4" {
+		t.Fatalf("ipv4 must force UseIPv4, got %v", strategy)
+	}
+	if err := Configure(`{"ipType":"ipv6"}`); err == nil {
+		t.Fatal("ipv6 without an IPv6 tunnel must be rejected")
+	}
+	if err := Configure(`{"memoryLimitMb":8}`); err == nil {
+		t.Fatal("tiny memory limit must be rejected")
+	}
+	if err := Configure(`{"ipv6":true,"ipType":"ipv6","memoryLimitMb":80,"mux":true,"blockUdp":true,"routeOnly":true}`); err != nil {
+		t.Fatal(err)
+	}
+	if limit := debug.SetMemoryLimit(-1); limit != 80<<20 {
+		t.Fatalf("memory limit not applied: %d", limit)
+	}
+	if err := Configure(`{}`); err != nil {
+		t.Fatal(err)
+	}
+	if limit := debug.SetMemoryLimit(-1); limit != math.MaxInt64 {
+		t.Fatalf("memory limit not cleared: %d", limit)
 	}
 }

@@ -57,6 +57,11 @@ final class CoreConfig {
         options.put("geoipUrl", preferences.getString("geoip_url", ""));
         options.put("geositeUrl", preferences.getString("geosite_url", ""));
         options.put("pingMethod", preferences.getString("ping_method", "tcp"));
+        options.put("mux", preferences.getBoolean("mux", false));
+        options.put("ipType", preferences.getString("ip_type", "auto"));
+        options.put("routeOnly", preferences.getBoolean("route_only", false));
+        options.put("blockUdp", preferences.getBoolean("block_udp", false));
+        options.put("memoryLimitMb", memoryLimit(preferences));
         try {
             options.put("autoProfileIds", new JSONArray(preferences.getString("auto_profiles", "[]")));
         } catch (Exception ignored) {
@@ -116,6 +121,14 @@ final class CoreConfig {
             return Math.max(1280, Math.min(1500, mtu));
         } catch (Exception ignored) {
             return 1400;
+        }
+    }
+
+    static int memoryLimit(SharedPreferences preferences) {
+        try {
+            return Integer.parseInt(preferences.getString("memory_limit", "0"));
+        } catch (Exception ignored) {
+            return 0;
         }
     }
 

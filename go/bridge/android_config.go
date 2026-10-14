@@ -11,6 +11,10 @@ import (
 type androidRuntimeOptions struct {
 	MTU               int
 	IPv6              bool
+	IPType            string // "auto", "ipv4" or "ipv6": answers DNS gives apps
+	Mux               bool
+	RouteOnly         bool // sniffed domains route, but connect to the original IP
+	BlockUDP          bool // everything but DNS; apps fall back from QUIC to TCP
 	DNS               dnsPreset
 	RoutingMode       string
 	SubscriptionRules bool
@@ -56,6 +60,9 @@ func androidRuntimeConfig(config []byte, options androidRuntimeOptions) ([]byte,
 	delete(settings, "gateway")
 	delete(settings, "dns")
 	settings["mtu"] = options.MTU
+	if sniffing, ok := tun["sniffing"].(map[string]any); ok && options.RouteOnly {
+		sniffing["routeOnly"] = true
+	}
 	document["inbounds"] = []any{tun}
 
 	// Traffic counters come from Android; per-connection stats and debug
@@ -96,8 +103,15 @@ func androidRuntimeConfig(config []byte, options androidRuntimeOptions) ([]byte,
 	addOutbound(map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{}})
 	addOutbound(map[string]any{"tag": "block", "protocol": "blackhole", "settings": map[string]any{}})
 	addOutbound(map[string]any{"tag": "dns-out", "protocol": "dns", "settings": map[string]any{}})
+	if options.Mux {
+		for _, raw := range outbounds {
+			if outbound, ok := raw.(map[string]any); ok {
+				enableMux(outbound)
+			}
+		}
+	}
 	document["outbounds"] = outbounds
-	document["dns"] = androidDNSConfig(options.DNS, options.IPv6)
+	document["dns"] = androidDNSConfig(options.DNS, options.IPv6, options.IPType)
 
 	rules, userRules := androidRoutingRules(document, options)
 	expandPrivateIPs(rules)
@@ -127,6 +141,12 @@ func androidRuntimeConfig(config []byte, options androidRuntimeOptions) ([]byte,
 	if routing == nil {
 		routing = map[string]any{}
 	}
+	if options.BlockUDP {
+		// Right after the DNS hijack, so DNS keeps working and nothing
+		// below can send UDP anywhere.
+		block := map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "network": "udp", "outboundTag": "block"}
+		rules = append(rules[:1], append([]any{block}, rules[1:]...)...)
+	}
 	routing["rules"] = rules
 	routing["domainStrategy"] = routingDomainStrategy(rules, options)
 	document["routing"] = routing
@@ -135,7 +155,7 @@ func androidRuntimeConfig(config []byte, options androidRuntimeOptions) ([]byte,
 
 // androidDNSConfig answers every DNS query of the tunnel with the selected
 // provider. Queries leave through the proxy, so the ISP sees none of them.
-func androidDNSConfig(preset dnsPreset, ipv6 bool) map[string]any {
+func androidDNSConfig(preset dnsPreset, ipv6 bool, ipType string) map[string]any {
 	servers := []string{}
 	if preset.DoHURL != "" {
 		servers = append(servers, preset.DoHURL)
@@ -152,9 +172,52 @@ func androidDNSConfig(preset dnsPreset, ipv6 bool) map[string]any {
 	}
 	strategy := "UseIPv4"
 	if ipv6 {
-		strategy = "UseIP"
+		switch ipType {
+		case "ipv4":
+		case "ipv6":
+			strategy = "UseIPv6"
+		default:
+			strategy = "UseIP"
+		}
 	}
 	return map[string]any{"servers": servers, "queryStrategy": strategy}
+}
+
+// enableMux turns on Mux.Cool for proxy protocols that support it, unless
+// the subscription already configured it. XTLS Vision (a flow), XHTTP with
+// its own multiplexing and QUIC-based protocols are left alone.
+func enableMux(outbound map[string]any) {
+	switch stringValue(outbound["protocol"]) {
+	case "vmess", "vless", "trojan", "shadowsocks":
+	default:
+		return
+	}
+	if _, configured := outbound["mux"]; configured {
+		return
+	}
+	if stream, ok := outbound["streamSettings"].(map[string]any); ok {
+		switch stringValue(stream["network"]) {
+		case "xhttp", "splithttp":
+			return
+		}
+	}
+	settings, _ := outbound["settings"].(map[string]any)
+	if stringValue(settings["flow"]) != "" {
+		return
+	}
+	for _, key := range []string{"vnext", "servers"} {
+		servers, _ := settings[key].([]any)
+		for _, raw := range servers {
+			server, _ := raw.(map[string]any)
+			users, _ := server["users"].([]any)
+			for _, rawUser := range users {
+				if user, ok := rawUser.(map[string]any); ok && stringValue(user["flow"]) != "" {
+					return
+				}
+			}
+		}
+	}
+	outbound["mux"] = map[string]any{"enabled": true, "concurrency": 8, "xudpConcurrency": 16, "xudpProxyUDP443": "reject"}
 }
 
 // androidRoutingRules orders the rules as: DNS hijack, the user's rules, the
