@@ -483,13 +483,15 @@ public final class MainActivity extends Activity {
         }
         if (findSelected() == null) return;
         autoConnectChecked = true;
-        if (!ShadowVpnService.connected && !"Подключение…".equals(ShadowVpnService.status)) {
+        if (!ShadowVpnService.connected && !ShadowVpnService.blocked
+                && !"Подключение…".equals(ShadowVpnService.status)) {
             toggleVpn();
         }
     }
 
     private void toggleVpn() {
-        if (ShadowVpnService.connected || "Подключение…".equals(ShadowVpnService.status)) {
+        if (ShadowVpnService.connected || ShadowVpnService.blocked
+                || "Подключение…".equals(ShadowVpnService.status)) {
             startService(new Intent(this, ShadowVpnService.class).setAction(ShadowVpnService.STOP));
             return;
         }
@@ -664,7 +666,9 @@ public final class MainActivity extends Activity {
         try {
             boolean connected = ShadowVpnService.connected;
             boolean connecting = !connected && "Подключение…".equals(ShadowVpnService.status);
+            // A Kill Switch retry also says "connecting"; the block matters more.
             String state = connected ? "connected"
+                    : ShadowVpnService.blocked ? "blocked"
                     : connecting ? "connecting"
                     : ShadowVpnService.status.startsWith("Ошибка") ? "error" : "disconnected";
             root.put("state", state);
@@ -728,6 +732,7 @@ public final class MainActivity extends Activity {
         value.put("sendHwid", preferences.getBoolean("send_hwid", true));
         value.put("autoConnectOpen", preferences.getBoolean("auto_connect_open", false));
         value.put("autoConnectBoot", preferences.getBoolean("auto_connect_boot", false));
+        value.put("killSwitch", preferences.getBoolean("kill_switch", false));
         value.put("dnsProvider", preferences.getString("dns_provider",
                 doh.isEmpty() ? "cloudflare" : "subscription-doh"));
         value.put("routingMode", preferences.getString("routing_mode", "full"));
@@ -857,6 +862,7 @@ public final class MainActivity extends Activity {
             editor.putBoolean("send_hwid", value.optBoolean("sendHwid", true));
             editor.putBoolean("auto_connect_open", value.optBoolean("autoConnectOpen", false));
             editor.putBoolean("auto_connect_boot", value.optBoolean("autoConnectBoot", false));
+            editor.putBoolean("kill_switch", value.optBoolean("killSwitch", false));
             editor.putString("dns_provider", allowed(value.optString("dnsProvider"),
                     new String[]{"subscription-doh", "cloudflare", "google", "quad9", "custom"}, "cloudflare"));
             editor.putString("custom_dns", value.optString("customDns", "").trim());

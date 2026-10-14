@@ -273,6 +273,7 @@
   function renderStatus(connected, connecting) {
     const selected = snapshot.selected;
     const error = snapshot.state === "error";
+    const blocked = snapshot.state === "blocked";
     const target = switchTarget();
     const key = [snapshot.state, selected?.id, selected?.name, target?.id, error ? snapshot.serviceStatus : ""].join("\u0000");
     if (key === statusKey) return;
@@ -285,12 +286,15 @@
       return;
     }
     setText("statusText", connected ? "Подключено"
+      : blocked ? "Интернет заблокирован"
       : connecting ? "Подключение…"
       : error ? "Ошибка подключения"
       : "Не подключено");
     const detail = $("statusDetail");
     detail.replaceChildren();
-    if (error) {
+    if (blocked) {
+      detail.textContent = "Kill Switch: нет связи с сервером, подключаемся снова";
+    } else if (error) {
       const text = String(snapshot.serviceStatus || "").replace(/^Ошибка:\s*/, "") || "Не удалось подключиться";
       detail.textContent = text.charAt(0).toUpperCase() + text.slice(1);
     } else if ((connected || connecting) && selected) {
@@ -343,11 +347,11 @@
     const connecting = state === "connecting";
     const power = $("powerButton");
     power.disabled = connecting || !snapshot.selected || !!snapshot.switchingTo;
-    power.setAttribute("aria-label", connected ? "Отключить VPN" : "Подключить VPN");
+    power.setAttribute("aria-label", connected || state === "blocked" ? "Отключить VPN" : "Подключить VPN");
     renderStatus(connected, connecting);
 
     setText("ipLabel", connected ? "Защищённый IP" : "IP");
-    setText("ipValue", snapshot.publicIp || (connecting ? "—" : "Определяем…"));
+    setText("ipValue", snapshot.publicIp || (connecting || state === "blocked" ? "—" : "Определяем…"));
     setText("sessionTime", snapshot.session || "00:00:00");
     $("sessionTime").hidden = !connected;
     $("detailsDivider").hidden = !connected;
@@ -780,6 +784,7 @@
     const ipv6 = switchControl(!!s.ipv6Enabled);
     const lan = switchControl(s.lanDirect !== false);
     const mtu = selectControl([["1280","1280"],["1360","1360"],["1400","1400"],["1500","1500"]], s.tunMtu || "1400");
+    const killSwitch = switchControl(!!s.killSwitch);
     const autoConnectOpen = switchControl(!!s.autoConnectOpen);
     const autoConnectBoot = switchControl(!!s.autoConnectBoot);
     body.append(
@@ -793,14 +798,15 @@
         row("Локальная сеть напрямую", "Роутер, принтеры и трансляция на ТВ без VPN", lan),
         row("MTU туннеля", "1400 подходит для большинства сетей", mtu)),
       group("Защита",
-        row("Kill Switch", "Включите «Постоянная VPN» и «Блокировать без VPN»",
+        row("Kill Switch", "Без интернета, пока VPN не подключится или если сервер пропал", killSwitch),
+        row("Системная блокировка", "Если Android остановит приложение: «Постоянная VPN» и «Блокировать без VPN»",
           button("Открыть", "secondary", () => native.openVpnSettings(), true))));
     const pingMethod = selectControl([["tcp","TCP"],["head","HTTP HEAD"],["get","HTTP GET"]], s.pingMethod);
     body.append(group("Проверка задержки", row("Метод", "HTTP точнее, TCP быстрее", pingMethod)));
     body.append(saveActions(() => ({
       dnsProvider: dns.value, customDns: customDns.value, tunMtu: mtu.value,
       ipv6Enabled: isOn(ipv6), lanDirect: isOn(lan), pingMethod: pingMethod.value,
-      autoConnectOpen: isOn(autoConnectOpen), autoConnectBoot: isOn(autoConnectBoot)
+      autoConnectOpen: isOn(autoConnectOpen), autoConnectBoot: isOn(autoConnectBoot), killSwitch: isOn(killSwitch)
     })));
   }
 
@@ -1157,9 +1163,10 @@
     selected:{...mockServers[1],subscription:{title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000}},
     servers:mockServers,
     subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
-    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,mux:false,ipType:"auto",routeOnly:false,blockUdp:false,memoryLimit:"0",dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
+    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,killSwitch:false,mux:false,ipType:"auto",routeOnly:false,blockUdp:false,memoryLimit:"0",dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
   });
   if (params.has("disconnected")) render({ state:"disconnected", serviceStatus:"", publicIp:"85.95.178.108", session:"" });
+  if (params.has("blocked")) render({ state:"blocked", serviceStatus:"Ошибка: сервер не отвечает", publicIp:"" });
   if (params.has("error")) render({ state:"error", serviceStatus:"Ошибка: не удалось подключиться к серверу", publicIp:"85.95.178.108" });
   const preview = params.get("preview");
   if (preview === "servers") openServers();

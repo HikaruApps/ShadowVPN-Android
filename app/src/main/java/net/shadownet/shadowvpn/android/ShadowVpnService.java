@@ -21,12 +21,16 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public final class ShadowVpnService extends VpnService {
     public static final String START = "net.shadownet.shadowvpn.START";
     public static final String STOP = "net.shadownet.shadowvpn.STOP";
     public static volatile String status = "Отключено";
     public static volatile boolean connected = false;
+    /** Kill Switch holds the TUN without a core: apps have no internet until it reconnects. */
+    public static volatile boolean blocked = false;
     private static final Deque<String> logs = new ArrayDeque<>();
     private static final String AUTO_PREFIX = "00000000000000000000000";
 
@@ -42,6 +46,10 @@ public final class ShadowVpnService extends VpnService {
     private ConnectivityManager.NetworkCallback networkCallback;
     private volatile Network lastNetwork;
     private volatile long networkChange;
+    private final ScheduledExecutorService retryTimer = Executors.newSingleThreadScheduledExecutor();
+    // Bumped by every connect and stop, so a stale retry never fires.
+    private volatile long retryGeneration;
+    private int retryAttempt;
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
@@ -62,9 +70,17 @@ public final class ShadowVpnService extends VpnService {
     }
 
     private void connect() {
-        closeTunnel(false);
-        status = "Подключение…";
+        retryGeneration++;
         SharedPreferences preferences = CoreConfig.preferences(this);
+        boolean killSwitch = preferences.getBoolean("kill_switch", false);
+        if (killSwitch) {
+            // Keep the TUN that may already hold traffic; only the core goes.
+            try { Bridge.stop(); } catch (Exception ignored) { }
+            connected = false;
+        } else {
+            closeTunnel(false);
+        }
+        status = "Подключение…";
         String profileId = preferences.getString("selected_id", "");
         try {
             CoreConfig.initialize(this);
@@ -72,38 +88,16 @@ public final class ShadowVpnService extends VpnService {
             Bridge.loadCachedProfiles();
             if (profileId.isEmpty()) throw new IllegalStateException("Сервер не выбран");
             CoreConfig.configure(this, preferences);
+            // With Kill Switch the TUN comes first, so nothing leaves the
+            // phone directly while the server is being prepared.
+            if (killSwitch) establishTunnel(preferences);
             addLog("Подготовка " + (profileId.startsWith(AUTO_PREFIX) ? "Auto" : "профиля " + profileId));
             Bridge.prepare(profileId);
-
-            int mtu = CoreConfig.mtu(preferences);
-            boolean ipv6 = preferences.getBoolean("ipv6_enabled", false);
-            boolean lanDirect = preferences.getBoolean("lan_direct", true);
-            String appMode = preferences.getString("app_routing_mode", "all");
-            String appPackages = preferences.getString("app_routing_packages", "[]");
-            Builder builder = new Builder()
-                    .setSession("ShadowVPN")
-                    .setMtu(mtu)
-                    .setMetered(false)
-                    .setBlocking(true)
-                    .addAddress("172.31.255.2", 30)
-                    .addDnsServer("1.1.1.1");
-            addRoutes(builder, "0.0.0.0/0", lanDirect ? LAN_V4 : new String[0]);
-            if (ipv6) {
-                // Without an IPv6 address Android blocks IPv6 for VPN apps, so
-                // nothing leaks when IPv6 is off.
-                builder.addAddress("fd31:ffff::2", 126).addDnsServer("2606:4700:4700::1111");
-                addRoutes(builder, "::/0", lanDirect ? LAN_V6 : new String[0]);
-            }
-            applyApplicationRouting(builder, appMode, appPackages);
-            addLog("TUN: MTU " + mtu + ", IPv6 " + (ipv6 ? "вкл" : "выкл")
-                    + ", локальная сеть " + (lanDirect ? "напрямую" : "через VPN")
-                    + ", приложения: " + appMode);
-            tunnel = builder.establish();
-            if (tunnel == null) {
-                throw new IllegalStateException("Android не создал VPN-интерфейс");
-            }
+            if (!killSwitch) establishTunnel(preferences);
             Bridge.start(tunnel.getFd());
             connected = true;
+            blocked = false;
+            retryAttempt = 0;
             status = "Подключено";
             addLog("Xray запущен");
             updateNotification("VPN подключён");
@@ -112,9 +106,62 @@ public final class ShadowVpnService extends VpnService {
             status = "Ошибка: " + (error.getMessage() == null
                     ? "не удалось подключиться" : error.getMessage());
             addLog(status);
+            if (killSwitch && tunnel != null) {
+                holdBlocked();
+                return;
+            }
             closeTunnel(false);
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
+        }
+    }
+
+    /** Leaves the TUN up with nothing reading it and retries with growing pauses. */
+    private void holdBlocked() {
+        blocked = true;
+        long delay = Math.min(60, 5L << Math.min(retryAttempt, 4));
+        retryAttempt++;
+        addLog("Kill Switch: интернет заблокирован, повтор через " + delay + " с");
+        updateNotification("Нет соединения · интернет заблокирован");
+        long generation = retryGeneration;
+        retryTimer.schedule(() -> executor.execute(() -> {
+            if (generation == retryGeneration && blocked) connect();
+        }), delay, TimeUnit.SECONDS);
+    }
+
+    /** Builds the TUN from the saved settings; a previous one is replaced without a gap. */
+    private void establishTunnel(SharedPreferences preferences) throws Exception {
+        int mtu = CoreConfig.mtu(preferences);
+        boolean ipv6 = preferences.getBoolean("ipv6_enabled", false);
+        boolean lanDirect = preferences.getBoolean("lan_direct", true);
+        String appMode = preferences.getString("app_routing_mode", "all");
+        String appPackages = preferences.getString("app_routing_packages", "[]");
+        Builder builder = new Builder()
+                .setSession("ShadowVPN")
+                .setMtu(mtu)
+                .setMetered(false)
+                .setBlocking(true)
+                .addAddress("172.31.255.2", 30)
+                .addDnsServer("1.1.1.1");
+        addRoutes(builder, "0.0.0.0/0", lanDirect ? LAN_V4 : new String[0]);
+        if (ipv6) {
+            // Without an IPv6 address Android blocks IPv6 for VPN apps, so
+            // nothing leaks when IPv6 is off.
+            builder.addAddress("fd31:ffff::2", 126).addDnsServer("2606:4700:4700::1111");
+            addRoutes(builder, "::/0", lanDirect ? LAN_V6 : new String[0]);
+        }
+        applyApplicationRouting(builder, appMode, appPackages);
+        addLog("TUN: MTU " + mtu + ", IPv6 " + (ipv6 ? "вкл" : "выкл")
+                + ", локальная сеть " + (lanDirect ? "напрямую" : "через VPN")
+                + ", приложения: " + appMode);
+        ParcelFileDescriptor next = builder.establish();
+        if (next == null) {
+            throw new IllegalStateException("Android не создал VPN-интерфейс");
+        }
+        ParcelFileDescriptor previous = tunnel;
+        tunnel = next;
+        if (previous != null) {
+            try { previous.close(); } catch (Exception ignored) { }
         }
     }
 
@@ -306,6 +353,8 @@ public final class ShadowVpnService extends VpnService {
     }
 
     private void closeTunnel(boolean updateStatus) {
+        retryGeneration++;
+        blocked = false;
         if (updateStatus) unwatchNetwork();
         try { Bridge.stop(); } catch (Exception ignored) { }
         try { if (tunnel != null) tunnel.close(); } catch (Exception ignored) { }
@@ -338,6 +387,7 @@ public final class ShadowVpnService extends VpnService {
         executor.execute(() -> closeTunnel(true));
         executor.shutdown();
         reloadExecutor.shutdownNow();
+        retryTimer.shutdownNow();
         super.onDestroy();
     }
 }
