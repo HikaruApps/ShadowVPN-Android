@@ -83,6 +83,8 @@ public final class MainActivity extends Activity {
     private String lastRuntimeSnapshot = "";
     private boolean importRunning;
     private boolean launchUpdateDone;
+    /** Auto-connect on launch runs once per process, not on every return to the app. */
+    private static boolean autoConnectChecked;
     private boolean pingRunning;
     private boolean wasConnected;
     private String selectedId = "";
@@ -244,6 +246,7 @@ public final class MainActivity extends Activity {
                 boolean refresh = hasSources() && (servers.isEmpty()
                         || !launchUpdateDone && preferences.getBoolean("update_on_open", false));
                 launchUpdateDone = true;
+                maybeAutoConnect();
                 if (refresh) importSubscriptions(false);
                 else {
                     fetchPublicIp(ShadowVpnService.connected);
@@ -341,6 +344,7 @@ public final class MainActivity extends Activity {
                     preferences.edit().putLong("last_sync", System.currentTimeMillis()).apply();
                     applyServers(parsed);
                     fetchPublicIp(ShadowVpnService.connected);
+                    maybeAutoConnect();
                     if (pingAfterUpdate()) runPings();
                     if (notify) UpdateNotifier.notify(this, before, serverIds(parsed), null);
                 });
@@ -468,6 +472,20 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    /** Connects once at launch; with an empty cache it waits for the first import. */
+    private void maybeAutoConnect() {
+        if (autoConnectChecked) return;
+        if (!preferences.getBoolean("auto_connect_open", false)) {
+            autoConnectChecked = true;
+            return;
+        }
+        if (findSelected() == null) return;
+        autoConnectChecked = true;
+        if (!ShadowVpnService.connected && !"Подключение…".equals(ShadowVpnService.status)) {
+            toggleVpn();
+        }
     }
 
     private void toggleVpn() {
@@ -708,6 +726,8 @@ public final class MainActivity extends Activity {
         value.put("pingAfterUpdate", pingAfterUpdate());
         value.put("notifyUpdates", preferences.getBoolean("notify_updates", false));
         value.put("sendHwid", preferences.getBoolean("send_hwid", true));
+        value.put("autoConnectOpen", preferences.getBoolean("auto_connect_open", false));
+        value.put("autoConnectBoot", preferences.getBoolean("auto_connect_boot", false));
         value.put("dnsProvider", preferences.getString("dns_provider",
                 doh.isEmpty() ? "cloudflare" : "subscription-doh"));
         value.put("routingMode", preferences.getString("routing_mode", "full"));
@@ -829,6 +849,8 @@ public final class MainActivity extends Activity {
             editor.putBoolean("ping_after_update", value.optBoolean("pingAfterUpdate", pingAfterUpdate()));
             editor.putBoolean("notify_updates", value.optBoolean("notifyUpdates", false));
             editor.putBoolean("send_hwid", value.optBoolean("sendHwid", true));
+            editor.putBoolean("auto_connect_open", value.optBoolean("autoConnectOpen", false));
+            editor.putBoolean("auto_connect_boot", value.optBoolean("autoConnectBoot", false));
             editor.putString("dns_provider", allowed(value.optString("dnsProvider"),
                     new String[]{"subscription-doh", "cloudflare", "google", "quad9", "custom"}, "cloudflare"));
             editor.putString("custom_dns", value.optString("customDns", "").trim());

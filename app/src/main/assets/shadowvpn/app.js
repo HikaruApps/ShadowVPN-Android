@@ -697,7 +697,7 @@
     body.append(
       group(null,
         navRow("servers", "Серверы", "Подписки, обновление и автовыбор", buildServerSettings),
-        navRow("connection", "Соединение", "DNS, MTU, IPv6 и локальная сеть", buildConnectionSettings),
+        navRow("connection", "Соединение", "Автоподключение, DNS, MTU и локальная сеть", buildConnectionSettings),
         navRow("routing", "Маршрутизация", "Что идёт через VPN, а что напрямую", buildRoutingSettings),
         navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling),
         navRow("application", "Приложение", "Фоновая работа", buildApplicationSettings)),
@@ -779,7 +779,12 @@
     const lan = switchControl(s.lanDirect !== false);
     const mtu = selectControl([["1280","1280"],["1360","1360"],["1400","1400"],["1500","1500"]], s.tunMtu || "1400");
     const fragmentation = switchControl(!!s.fragmentation);
+    const autoConnectOpen = switchControl(!!s.autoConnectOpen);
+    const autoConnectBoot = switchControl(!!s.autoConnectBoot);
     body.append(
+      group("Автоподключение",
+        row("При запуске приложения", "К выбранному серверу", autoConnectOpen),
+        row("При загрузке устройства", "Если разрешение на VPN уже выдано", autoConnectBoot)),
       group("DNS", dnsRow, customRow),
       el("p", "group-note", "Все DNS-запросы идут через VPN, провайдер их не видит."),
       group("Сеть",
@@ -795,7 +800,8 @@
     body.append(group("Проверка задержки", row("Метод", "HTTP точнее, TCP быстрее", pingMethod)));
     body.append(saveActions(() => ({
       dnsProvider: dns.value, customDns: customDns.value, fragmentation: isOn(fragmentation), tunMtu: mtu.value,
-      ipv6Enabled: isOn(ipv6), lanDirect: isOn(lan), pingMethod: pingMethod.value
+      ipv6Enabled: isOn(ipv6), lanDirect: isOn(lan), pingMethod: pingMethod.value,
+      autoConnectOpen: isOn(autoConnectOpen), autoConnectBoot: isOn(autoConnectBoot)
     })));
   }
 
@@ -1125,7 +1131,7 @@
     selected:{...mockServers[1],subscription:{title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000}},
     servers:mockServers,
     subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
-    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
+    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
   });
   if (params.has("disconnected")) render({ state:"disconnected", serviceStatus:"", publicIp:"85.95.178.108", session:"" });
   if (params.has("error")) render({ state:"error", serviceStatus:"Ошибка: не удалось подключиться к серверу", publicIp:"85.95.178.108" });
