@@ -567,6 +567,7 @@
   }
 
   function resetPanelState() {
+    flushSettings();
     panelBackAction = null;
     splitAppsReceiver = null;
     panelPager?.disconnect();
@@ -687,14 +688,36 @@
     return node;
   }
 
+  // Toggles look applied the moment they flip, so a page also saves when
+  // the user leaves it (back, close, swipe down, app to background).
+  let pendingSettings = null;
+
   function saveActions(collect) {
+    pendingSettings = collect;
     return actions(button("Сохранить", "primary", () => {
+      pendingSettings = null;
       // Keep the local copy current so a second page saved before Android
       // answers does not send stale values back.
       snapshot.settings = { ...(snapshot.settings || {}), ...collect() };
       native.saveSettings(JSON.stringify(snapshot.settings));
       buildSettings();
     }));
+  }
+
+  function flushSettings(stayOnPage = false) {
+    const collect = pendingSettings;
+    if (!stayOnPage) pendingSettings = null;
+    if (!collect) return;
+    const current = snapshot.settings || {};
+    const changes = collect();
+    // Lists such as Auto servers may come back in another order.
+    const same = (a, b) => Array.isArray(a) && Array.isArray(b)
+      ? JSON.stringify([...a].sort()) === JSON.stringify([...b].sort())
+      : JSON.stringify(a) === JSON.stringify(b);
+    const changed = Object.keys(changes).some(key => !same(changes[key], current[key]));
+    if (!changed) return;
+    snapshot.settings = { ...current, ...changes };
+    native.saveSettings(JSON.stringify(snapshot.settings));
   }
 
   function buildSettings() {
@@ -1091,6 +1114,8 @@
   }
 
   /* ---------- Wiring ---------- */
+
+  document.addEventListener("visibilitychange", () => { if (document.hidden) flushSettings(true); });
 
   $("powerButton").addEventListener("click", () => native.toggleVpn());
   $("menuButton").addEventListener("click", event => { event.stopPropagation(); setMenu($("appMenu").hidden); });
