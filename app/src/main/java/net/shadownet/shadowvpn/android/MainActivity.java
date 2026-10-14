@@ -912,10 +912,13 @@ public final class MainActivity extends Activity {
             CoreConfig.configure(this, preferences);
         } catch (Exception error) {
             restorePreferences(previous);
+            ShadowVpnService.addLog("Настройки не сохранены: " + cleanError(error));
             uiMessage = "Не сохранено · " + cleanError(error);
             pushSnapshot();
             return;
         }
+        ShadowVpnService.addLog("Настройки сохранены · Kill Switch "
+                + (preferences.getBoolean("kill_switch", false) ? "вкл" : "выкл"));
         boolean connected = ShadowVpnService.connected;
         boolean reconnect = connected && !tunBefore.equals(signature(TUN_KEYS));
         boolean reload = connected && !reconnect && !coreBefore.equals(signature(CORE_KEYS));

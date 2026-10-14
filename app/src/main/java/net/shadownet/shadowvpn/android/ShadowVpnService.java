@@ -73,6 +73,7 @@ public final class ShadowVpnService extends VpnService {
         retryGeneration++;
         SharedPreferences preferences = CoreConfig.preferences(this);
         boolean killSwitch = preferences.getBoolean("kill_switch", false);
+        addLog("Подключение · Kill Switch " + (killSwitch ? "вкл" : "выкл"));
         if (killSwitch) {
             // Keep the TUN that may already hold traffic; only the core goes.
             try { Bridge.stop(); } catch (Exception ignored) { }
