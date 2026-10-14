@@ -917,8 +917,6 @@ public final class MainActivity extends Activity {
             pushSnapshot();
             return;
         }
-        ShadowVpnService.addLog("Настройки сохранены · Kill Switch "
-                + (preferences.getBoolean("kill_switch", false) ? "вкл" : "выкл"));
         boolean connected = ShadowVpnService.connected;
         boolean reconnect = connected && !tunBefore.equals(signature(TUN_KEYS));
         boolean reload = connected && !reconnect && !coreBefore.equals(signature(CORE_KEYS));
@@ -1029,7 +1027,9 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void saveSettings(String json) {
-            ui.post(() -> saveSettings(json));
+            // Qualified: a bare call resolves to this bridge method and would
+            // re-post itself forever without ever saving.
+            ui.post(() -> MainActivity.this.saveSettings(json));
         }
 
         @JavascriptInterface public String getLogs() {
