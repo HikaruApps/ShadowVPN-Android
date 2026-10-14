@@ -82,6 +82,9 @@ public final class MainActivity extends Activity {
     private boolean webReady;
     private String lastRuntimeSnapshot = "";
     private boolean importRunning;
+    private boolean launchUpdateDone;
+    /** Auto-connect on launch runs once per process, not on every return to the app. */
+    private static boolean autoConnectChecked;
     private boolean pingRunning;
     private boolean wasConnected;
     private String selectedId = "";
@@ -240,13 +243,29 @@ public final class MainActivity extends Activity {
                     try { applyServers(parseServers(new JSONObject(result))); }
                     catch (Exception ignored) { }
                 }
-                if (servers.isEmpty() && hasSources()) importSubscriptions(false);
+                boolean refresh = hasSources() && (servers.isEmpty()
+                        || !launchUpdateDone && preferences.getBoolean("update_on_open", false));
+                launchUpdateDone = true;
+                maybeAutoConnect();
+                if (refresh) importSubscriptions(false);
                 else {
                     fetchPublicIp(ShadowVpnService.connected);
                     if (preferences.getBoolean("ping_on_open", false)) runPings();
                 }
             });
         });
+    }
+
+    private static Set<String> serverIds(List<ServerItem> list) {
+        Set<String> ids = new HashSet<>();
+        for (ServerItem server : list) if (!server.auto) ids.add(server.id);
+        return ids;
+    }
+
+    /** Older versions pinged after every import when "ping on open" was on. */
+    private boolean pingAfterUpdate() {
+        return preferences.getBoolean("ping_after_update",
+                preferences.getBoolean("ping_on_open", false));
     }
 
     private boolean hasSources() {
@@ -296,7 +315,10 @@ public final class MainActivity extends Activity {
         try {
             request.put("urls", subscriptionUrls());
             request.put("manual", manualConfigs());
+            request.put("sendHwid", preferences.getBoolean("send_hwid", true));
         } catch (Exception ignored) { }
+        boolean notify = !userInitiated && preferences.getBoolean("notify_updates", false);
+        Set<String> before = serverIds(servers);
         importRunning = true;
         if (userInitiated) uiMessage = "Обновляем подписку…";
         pushSnapshot();
@@ -322,13 +344,16 @@ public final class MainActivity extends Activity {
                     preferences.edit().putLong("last_sync", System.currentTimeMillis()).apply();
                     applyServers(parsed);
                     fetchPublicIp(ShadowVpnService.connected);
-                    if (preferences.getBoolean("ping_on_open", false)) runPings();
+                    maybeAutoConnect();
+                    if (pingAfterUpdate()) runPings();
+                    if (notify) UpdateNotifier.notify(this, before, serverIds(parsed), null);
                 });
             } catch (Exception error) {
                 ui.post(() -> {
                     importRunning = false;
                     uiMessage = "Не удалось обновить · " + cleanError(error);
                     pushSnapshot();
+                    if (notify) UpdateNotifier.notify(this, before, before, cleanError(error));
                 });
             }
         });
@@ -449,8 +474,24 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /** Connects once at launch; with an empty cache it waits for the first import. */
+    private void maybeAutoConnect() {
+        if (autoConnectChecked) return;
+        if (!preferences.getBoolean("auto_connect_open", false)) {
+            autoConnectChecked = true;
+            return;
+        }
+        if (findSelected() == null) return;
+        autoConnectChecked = true;
+        if (!ShadowVpnService.connected && !ShadowVpnService.blocked
+                && !"Подключение…".equals(ShadowVpnService.status)) {
+            toggleVpn();
+        }
+    }
+
     private void toggleVpn() {
-        if (ShadowVpnService.connected || "Подключение…".equals(ShadowVpnService.status)) {
+        if (ShadowVpnService.connected || ShadowVpnService.blocked
+                || "Подключение…".equals(ShadowVpnService.status)) {
             startService(new Intent(this, ShadowVpnService.class).setAction(ShadowVpnService.STOP));
             return;
         }
@@ -625,7 +666,9 @@ public final class MainActivity extends Activity {
         try {
             boolean connected = ShadowVpnService.connected;
             boolean connecting = !connected && "Подключение…".equals(ShadowVpnService.status);
+            // A Kill Switch retry also says "connecting"; the block matters more.
             String state = connected ? "connected"
+                    : ShadowVpnService.blocked ? "blocked"
                     : connecting ? "connecting"
                     : ShadowVpnService.status.startsWith("Ошибка") ? "error" : "disconnected";
             root.put("state", state);
@@ -683,12 +726,24 @@ public final class MainActivity extends Activity {
         JSONObject value = new JSONObject();
         value.put("autoUpdate", preferences.getString("auto_update", "1440"));
         value.put("pingOnOpen", preferences.getBoolean("ping_on_open", false));
+        value.put("updateOnOpen", preferences.getBoolean("update_on_open", false));
+        value.put("pingAfterUpdate", pingAfterUpdate());
+        value.put("notifyUpdates", preferences.getBoolean("notify_updates", false));
+        value.put("sendHwid", preferences.getBoolean("send_hwid", true));
+        value.put("autoConnectOpen", preferences.getBoolean("auto_connect_open", false));
+        value.put("autoConnectBoot", preferences.getBoolean("auto_connect_boot", false));
+        value.put("killSwitch", preferences.getBoolean("kill_switch", false));
         value.put("dnsProvider", preferences.getString("dns_provider",
                 doh.isEmpty() ? "cloudflare" : "subscription-doh"));
         value.put("routingMode", preferences.getString("routing_mode", "full"));
         value.put("routingRules", preferences.getString("routing_rules", ""));
         value.put("pingMethod", preferences.getString("ping_method", "tcp"));
         value.put("fragmentation", preferences.getBoolean("fragmentation", false));
+        value.put("mux", preferences.getBoolean("mux", false));
+        value.put("ipType", preferences.getString("ip_type", "auto"));
+        value.put("routeOnly", preferences.getBoolean("route_only", false));
+        value.put("blockUdp", preferences.getBoolean("block_udp", false));
+        value.put("memoryLimit", preferences.getString("memory_limit", "0"));
         value.put("tunMtu", preferences.getString("tun_mtu", "1400"));
         value.put("ipv6Enabled", preferences.getBoolean("ipv6_enabled", false));
         value.put("lanDirect", preferences.getBoolean("lan_direct", true));
@@ -712,7 +767,8 @@ public final class MainActivity extends Activity {
             "tun_mtu", "ipv6_enabled", "lan_direct", "app_routing_mode", "app_routing_packages"};
     private static final String[] CORE_KEYS = {
             "dns_provider", "custom_dns", "fragmentation", "routing_mode", "routing_rules",
-            "subscription_rules", "geoip_url", "geosite_url", "auto_profiles"};
+            "subscription_rules", "geoip_url", "geosite_url", "auto_profiles",
+            "mux", "ip_type", "route_only", "block_udp"};
 
     private String signature(String[] keys) {
         Map<String, ?> all = preferences.getAll();
@@ -800,6 +856,13 @@ public final class MainActivity extends Activity {
             editor.putString("auto_update", allowed(value.optString("autoUpdate"),
                     new String[]{"15", "60", "360", "1440", "off"}, "1440"));
             editor.putBoolean("ping_on_open", value.optBoolean("pingOnOpen", false));
+            editor.putBoolean("update_on_open", value.optBoolean("updateOnOpen", false));
+            editor.putBoolean("ping_after_update", value.optBoolean("pingAfterUpdate", pingAfterUpdate()));
+            editor.putBoolean("notify_updates", value.optBoolean("notifyUpdates", false));
+            editor.putBoolean("send_hwid", value.optBoolean("sendHwid", true));
+            editor.putBoolean("auto_connect_open", value.optBoolean("autoConnectOpen", false));
+            editor.putBoolean("auto_connect_boot", value.optBoolean("autoConnectBoot", false));
+            editor.putBoolean("kill_switch", value.optBoolean("killSwitch", false));
             editor.putString("dns_provider", allowed(value.optString("dnsProvider"),
                     new String[]{"subscription-doh", "cloudflare", "google", "quad9", "custom"}, "cloudflare"));
             editor.putString("custom_dns", value.optString("customDns", "").trim());
@@ -808,6 +871,16 @@ public final class MainActivity extends Activity {
             editor.putString("ping_method", allowed(value.optString("pingMethod"),
                     new String[]{"tcp", "head", "get"}, "tcp"));
             editor.putBoolean("fragmentation", value.optBoolean("fragmentation", false));
+            editor.putBoolean("mux", value.optBoolean("mux", false));
+            String ipType = allowed(value.optString("ipType"),
+                    new String[]{"auto", "ipv4", "ipv6"}, "auto");
+            // Turning IPv6 off must not leave the core asking for IPv6 only.
+            if ("ipv6".equals(ipType) && !value.optBoolean("ipv6Enabled", false)) ipType = "auto";
+            editor.putString("ip_type", ipType);
+            editor.putBoolean("route_only", value.optBoolean("routeOnly", false));
+            editor.putBoolean("block_udp", value.optBoolean("blockUdp", false));
+            editor.putString("memory_limit", allowed(value.optString("memoryLimit"),
+                    new String[]{"0", "40", "60", "80", "100", "150"}, "0"));
             editor.putString("tun_mtu", allowed(value.optString("tunMtu"),
                     new String[]{"1280", "1360", "1400", "1500"}, "1400"));
             editor.putBoolean("ipv6_enabled", value.optBoolean("ipv6Enabled", false));
@@ -839,6 +912,7 @@ public final class MainActivity extends Activity {
             CoreConfig.configure(this, preferences);
         } catch (Exception error) {
             restorePreferences(previous);
+            ShadowVpnService.addLog("Настройки не сохранены: " + cleanError(error));
             uiMessage = "Не сохранено · " + cleanError(error);
             pushSnapshot();
             return;
@@ -849,6 +923,11 @@ public final class MainActivity extends Activity {
         uiMessage = reconnect ? "Настройки сохранены, переподключаемся"
                 : reload ? "Применяем настройки…" : "Настройки сохранены";
         pushSnapshot();
+        if (preferences.getBoolean("notify_updates", false) && Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 102);
+        }
         if (reconnect) startSelectedServer();
         else if (reload) reloadCore();
     }
@@ -948,7 +1027,9 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void saveSettings(String json) {
-            ui.post(() -> saveSettings(json));
+            // Qualified: a bare call resolves to this bridge method and would
+            // re-post itself forever without ever saving.
+            ui.post(() -> MainActivity.this.saveSettings(json));
         }
 
         @JavascriptInterface public String getLogs() {

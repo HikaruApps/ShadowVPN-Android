@@ -51,6 +51,7 @@
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.7 5.6 3.7 9s-1.2 6.4-3.7 9c-2.5-2.6-3.7-5.6-3.7-9S9.5 5.6 12 3Z"/>',
     servers: '<rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01"/>',
     connection: '<path d="M5 12.5a10 10 0 0 1 14 0M8 15.5a5.5 5.5 0 0 1 8 0M12 19h.01"/>',
+    tunnel: '<path d="M3 19v-8a9 9 0 0 1 18 0v8M2 19h20M8 19v-7a4 4 0 0 1 8 0v7"/>',
     routing: '<circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H14a4 4 0 0 0 4-4V8.5M15.5 6H10a4 4 0 0 0-4 4v5.5"/>',
     split: '<path d="M6 3v6a3 3 0 0 0 3 3h6a3 3 0 0 1 3 3v6M18 3v6a3 3 0 0 1-3 3"/><path d="M9 12a3 3 0 0 0-3 3v6"/>',
     application: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/>',
@@ -272,6 +273,7 @@
   function renderStatus(connected, connecting) {
     const selected = snapshot.selected;
     const error = snapshot.state === "error";
+    const blocked = snapshot.state === "blocked";
     const target = switchTarget();
     const key = [snapshot.state, selected?.id, selected?.name, target?.id, error ? snapshot.serviceStatus : ""].join("\u0000");
     if (key === statusKey) return;
@@ -284,12 +286,15 @@
       return;
     }
     setText("statusText", connected ? "Подключено"
+      : blocked ? "Интернет заблокирован"
       : connecting ? "Подключение…"
       : error ? "Ошибка подключения"
       : "Не подключено");
     const detail = $("statusDetail");
     detail.replaceChildren();
-    if (error) {
+    if (blocked) {
+      detail.textContent = "Kill Switch: нет связи с сервером, подключаемся снова";
+    } else if (error) {
       const text = String(snapshot.serviceStatus || "").replace(/^Ошибка:\s*/, "") || "Не удалось подключиться";
       detail.textContent = text.charAt(0).toUpperCase() + text.slice(1);
     } else if ((connected || connecting) && selected) {
@@ -342,11 +347,11 @@
     const connecting = state === "connecting";
     const power = $("powerButton");
     power.disabled = connecting || !snapshot.selected || !!snapshot.switchingTo;
-    power.setAttribute("aria-label", connected ? "Отключить VPN" : "Подключить VPN");
+    power.setAttribute("aria-label", connected || state === "blocked" ? "Отключить VPN" : "Подключить VPN");
     renderStatus(connected, connecting);
 
     setText("ipLabel", connected ? "Защищённый IP" : "IP");
-    setText("ipValue", snapshot.publicIp || (connecting ? "—" : "Определяем…"));
+    setText("ipValue", snapshot.publicIp || (connecting || state === "blocked" ? "—" : "Определяем…"));
     setText("sessionTime", snapshot.session || "00:00:00");
     $("sessionTime").hidden = !connected;
     $("detailsDivider").hidden = !connected;
@@ -562,6 +567,7 @@
   }
 
   function resetPanelState() {
+    flushSettings();
     panelBackAction = null;
     splitAppsReceiver = null;
     panelPager?.disconnect();
@@ -682,8 +688,14 @@
     return node;
   }
 
+  // Toggles look applied the moment they flip, so a page also saves when
+  // the user leaves it (back, close, swipe down, app to background).
+  let pendingSettings = null;
+
   function saveActions(collect) {
+    pendingSettings = collect;
     return actions(button("Сохранить", "primary", () => {
+      pendingSettings = null;
       // Keep the local copy current so a second page saved before Android
       // answers does not send stale values back.
       snapshot.settings = { ...(snapshot.settings || {}), ...collect() };
@@ -692,15 +704,32 @@
     }));
   }
 
+  function flushSettings(stayOnPage = false) {
+    const collect = pendingSettings;
+    if (!stayOnPage) pendingSettings = null;
+    if (!collect) return;
+    const current = snapshot.settings || {};
+    const changes = collect();
+    // Lists such as Auto servers may come back in another order.
+    const same = (a, b) => Array.isArray(a) && Array.isArray(b)
+      ? JSON.stringify([...a].sort()) === JSON.stringify([...b].sort())
+      : JSON.stringify(a) === JSON.stringify(b);
+    const changed = Object.keys(changes).some(key => !same(changes[key], current[key]));
+    if (!changed) return;
+    snapshot.settings = { ...current, ...changes };
+    native.saveSettings(JSON.stringify(snapshot.settings));
+  }
+
   function buildSettings() {
     const body = page("Настройки");
     body.append(
       group(null,
-        navRow("servers", "Серверы", "Подписки и автовыбор", buildServerSettings),
-        navRow("connection", "Соединение", "DNS, MTU, IPv6 и локальная сеть", buildConnectionSettings),
+        navRow("servers", "Серверы", "Подписки, обновление и автовыбор", buildServerSettings),
+        navRow("connection", "Соединение", "Автоподключение, DNS, MTU и локальная сеть", buildConnectionSettings),
+        navRow("tunnel", "Туннель", "Фрагментация, Mux, UDP и память", buildTunnelSettings),
         navRow("routing", "Маршрутизация", "Что идёт через VPN, а что напрямую", buildRoutingSettings),
         navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling),
-        navRow("application", "Приложение", "Фоновая работа и обновления", buildApplicationSettings)),
+        navRow("application", "Приложение", "Фоновая работа", buildApplicationSettings)),
       group(null,
         navRow("logs", "Логи", null, () => buildLogs(true)),
         navRow("about", "О приложении", `Версия ${snapshot.appVersion || "—"}`, buildAbout)));
@@ -710,11 +739,23 @@
     const body = page("Серверы", buildSettings);
     const s = snapshot.settings || {};
     const sourceCount = [snapshot.subscriptions?.wifi, snapshot.subscriptions?.lte].filter(Boolean).length;
+    const autoUpdate = selectControl([["15","Каждые 15 минут"],["60","Каждый час"],["360","Каждые 6 часов"],["1440","Раз в сутки"],["off","Выключено"]], s.autoUpdate);
+    const updateOnOpen = switchControl(!!s.updateOnOpen);
+    const notifyUpdates = switchControl(!!s.notifyUpdates);
+    const sendHwid = switchControl(s.sendHwid !== false);
     const pingOnOpen = switchControl(!!s.pingOnOpen);
+    const pingAfterUpdate = switchControl(!!s.pingAfterUpdate);
     body.append(group("Подписки",
       row("Источники", `Настроено ${sourceCount} из 2`,
         button("Изменить", "secondary", () => buildSubscriptions(true), true)),
-      row("Проверять задержку", "После загрузки списка серверов", pingOnOpen)));
+      row("Отправлять HWID", "Без него панель может не выдать подписку", sendHwid)));
+    body.append(group("Обновление",
+      row("Автообновление", "Не прерывает активное подключение", autoUpdate),
+      row("Обновлять при запуске", "Загружать подписку при открытии приложения", updateOnOpen),
+      row("Уведомлять об обновлениях", "Сколько серверов добавилось и пропало", notifyUpdates)));
+    body.append(group("Проверка задержки",
+      row("При запуске", "Для сохранённого списка серверов", pingOnOpen),
+      row("После обновления", "Когда подписка загружена заново", pingAfterUpdate)));
 
     const servers = snapshot.servers.filter(server => !server.auto);
     const saved = new Set(s.autoProfiles || []);
@@ -734,7 +775,12 @@
       return label;
     }, panelBody, 40);
     body.append(saveActions(() => ({
+      autoUpdate: autoUpdate.value,
+      updateOnOpen: isOn(updateOnOpen),
+      notifyUpdates: isOn(notifyUpdates),
+      sendHwid: isOn(sendHwid),
       pingOnOpen: isOn(pingOnOpen),
+      pingAfterUpdate: isOn(pingAfterUpdate),
       autoProfiles: chosen.size === servers.length ? [] : servers.filter(server => chosen.has(server.id)).map(server => server.id)
     })));
   }
@@ -761,24 +807,29 @@
     const ipv6 = switchControl(!!s.ipv6Enabled);
     const lan = switchControl(s.lanDirect !== false);
     const mtu = selectControl([["1280","1280"],["1360","1360"],["1400","1400"],["1500","1500"]], s.tunMtu || "1400");
-    const fragmentation = switchControl(!!s.fragmentation);
+    const killSwitch = switchControl(!!s.killSwitch);
+    const autoConnectOpen = switchControl(!!s.autoConnectOpen);
+    const autoConnectBoot = switchControl(!!s.autoConnectBoot);
     body.append(
+      group("Автоподключение",
+        row("При запуске приложения", "К выбранному серверу", autoConnectOpen),
+        row("При загрузке устройства", "Если разрешение на VPN уже выдано", autoConnectBoot)),
       group("DNS", dnsRow, customRow),
       el("p", "group-note", "Все DNS-запросы идут через VPN, провайдер их не видит."),
       group("Сеть",
         row("IPv6", "Включайте, если сервер поддерживает IPv6", ipv6),
         row("Локальная сеть напрямую", "Роутер, принтеры и трансляция на ТВ без VPN", lan),
         row("MTU туннеля", "1400 подходит для большинства сетей", mtu)),
-      group("Обход блокировок",
-        row("Фрагментация TLS", "Делит ClientHello, помогает против DPI", fragmentation)),
       group("Защита",
-        row("Kill Switch", "Включите «Постоянная VPN» и «Блокировать без VPN»",
+        row("Kill Switch", "Без интернета, пока VPN не подключится или если сервер пропал", killSwitch),
+        row("Системная блокировка", "Если Android остановит приложение: «Постоянная VPN» и «Блокировать без VPN»",
           button("Открыть", "secondary", () => native.openVpnSettings(), true))));
     const pingMethod = selectControl([["tcp","TCP"],["head","HTTP HEAD"],["get","HTTP GET"]], s.pingMethod);
     body.append(group("Проверка задержки", row("Метод", "HTTP точнее, TCP быстрее", pingMethod)));
     body.append(saveActions(() => ({
-      dnsProvider: dns.value, customDns: customDns.value, fragmentation: isOn(fragmentation), tunMtu: mtu.value,
-      ipv6Enabled: isOn(ipv6), lanDirect: isOn(lan), pingMethod: pingMethod.value
+      dnsProvider: dns.value, customDns: customDns.value, tunMtu: mtu.value,
+      ipv6Enabled: isOn(ipv6), lanDirect: isOn(lan), pingMethod: pingMethod.value,
+      autoConnectOpen: isOn(autoConnectOpen), autoConnectBoot: isOn(autoConnectBoot), killSwitch: isOn(killSwitch)
     })));
   }
 
@@ -940,6 +991,33 @@
     })));
   }
 
+  function buildTunnelSettings() {
+    const body = page("Туннель", buildSettings);
+    const s = snapshot.settings || {};
+    const fragmentation = switchControl(!!s.fragmentation);
+    const mux = switchControl(!!s.mux);
+    const ipTypes = [["auto","Авто"],["ipv4","IPv4"]];
+    if (s.ipv6Enabled) ipTypes.push(["ipv6","IPv6"]);
+    const ipType = selectControl(ipTypes, s.ipv6Enabled || s.ipType !== "ipv6" ? (s.ipType || "auto") : "auto");
+    const routeOnly = switchControl(!!s.routeOnly);
+    const blockUdp = switchControl(!!s.blockUdp);
+    const memory = selectControl([["0","Без ограничения"],["40","40 МБ"],["60","60 МБ"],["80","80 МБ"],["100","100 МБ"],["150","150 МБ"]], s.memoryLimit || "0");
+    body.append(
+      group("Обход блокировок",
+        row("Фрагментация TLS", "Делит ClientHello, помогает против DPI", fragmentation),
+        row("Мультиплексирование", "Mux: несколько соединений в одном. Не для Vision и XHTTP", mux)),
+      group("Трафик",
+        row("Тип IP", s.ipv6Enabled ? "Какие адреса получают приложения" : "IPv6 включается в «Соединении»", ipType),
+        row("Маршрутизация по домену", "Домен только для правил, подключение к исходному IP", routeOnly),
+        row("Блокировать UDP", "Кроме DNS. Игры и звонки могут не работать", blockUdp)),
+      group("Ресурсы",
+        row("Память ядра", "Лимит помогает на слабых устройствах", memory)));
+    body.append(saveActions(() => ({
+      fragmentation: isOn(fragmentation), mux: isOn(mux), ipType: ipType.value,
+      routeOnly: isOn(routeOnly), blockUdp: isOn(blockUdp), memoryLimit: memory.value
+    })));
+  }
+
   function buildApplicationSettings() {
     const body = page("Приложение", buildSettings);
     const s = snapshot.settings || {};
@@ -956,9 +1034,6 @@
     };
     refreshBattery(!!s.batteryUnrestricted);
     body.append(group("Фоновая работа", battery));
-    const autoUpdate = selectControl([["15","Каждые 15 минут"],["60","Каждый час"],["360","Каждые 6 часов"],["1440","Раз в сутки"],["off","Выключено"]], s.autoUpdate);
-    body.append(group("Подписка", row("Автообновление", "Не прерывает активное подключение", autoUpdate)));
-    body.append(saveActions(() => ({ autoUpdate: autoUpdate.value })));
   }
 
   function buildAbout() {
@@ -1040,6 +1115,8 @@
 
   /* ---------- Wiring ---------- */
 
+  document.addEventListener("visibilitychange", () => { if (document.hidden) flushSettings(true); });
+
   $("powerButton").addEventListener("click", () => native.toggleVpn());
   $("menuButton").addEventListener("click", event => { event.stopPropagation(); setMenu($("appMenu").hidden); });
   document.addEventListener("click", event => {
@@ -1111,17 +1188,18 @@
     selected:{...mockServers[1],subscription:{title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000}},
     servers:mockServers,
     subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
-    settings:{autoUpdate:"1440",pingOnOpen:true,dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
+    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,killSwitch:false,mux:false,ipType:"auto",routeOnly:false,blockUdp:false,memoryLimit:"0",dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"tcp",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
   });
   if (params.has("disconnected")) render({ state:"disconnected", serviceStatus:"", publicIp:"85.95.178.108", session:"" });
+  if (params.has("blocked")) render({ state:"blocked", serviceStatus:"Ошибка: сервер не отвечает", publicIp:"" });
   if (params.has("error")) render({ state:"error", serviceStatus:"Ошибка: не удалось подключиться к серверу", publicIp:"85.95.178.108" });
   const preview = params.get("preview");
   if (preview === "servers") openServers();
   if (preview === "menu") setMenu(true);
   if (preview === "welcome") render({ needsSubscription:true });
   if (["settings", "subscriptions", "logs"].includes(preview)) openPanel(preview);
-  if (["connection", "routing", "split", "application", "about", "auto"].includes(preview)) {
+  if (["connection", "tunnel", "routing", "split", "application", "about", "auto"].includes(preview)) {
     openPanel("settings");
-    ({ connection:buildConnectionSettings, routing:buildRoutingSettings, split:buildSplitTunneling, application:buildApplicationSettings, about:buildAbout, auto:buildServerSettings })[preview]();
+    ({ connection:buildConnectionSettings, tunnel:buildTunnelSettings, routing:buildRoutingSettings, split:buildSplitTunneling, application:buildApplicationSettings, about:buildAbout, auto:buildServerSettings })[preview]();
   }
 })();

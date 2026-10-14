@@ -83,6 +83,9 @@ img{display:block}
 .status .server-flag{width:18px;height:18px;flex:0 0 18px}
 .app[data-state="error"] .status h1{color:var(--danger)}
 .app[data-state="error"] .status p{display:block}
+.app[data-state="blocked"] .power{border-color:var(--danger);color:var(--text);box-shadow:0 0 0 8px var(--danger-soft)}
+.app[data-state="blocked"] .status h1{color:var(--danger)}
+.app[data-state="blocked"] .status p{display:block}
 
 .stats{grid-row:3;display:flex;flex-direction:column;align-items:center;gap:12px}
 .stat-grid{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:8px}

@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	xraynet "github.com/xtls/xray-core/common/net"
@@ -66,6 +69,13 @@ type mobileOptions struct {
 	// PreferredSource restricts Auto to servers of one subscription (the one
 	// for the current network type). -1 disables the restriction.
 	PreferredSource int `json:"preferredSource"`
+	// Tunnel tuning, applied by Reload without recreating the TUN.
+	Mux       bool   `json:"mux"`
+	IPType    string `json:"ipType"` // "auto", "ipv4" or "ipv6"
+	RouteOnly bool   `json:"routeOnly"`
+	BlockUDP  bool   `json:"blockUdp"`
+	// MemoryLimitMB is a soft limit for the Go heap; 0 means none.
+	MemoryLimitMB int `json:"memoryLimitMb"`
 }
 
 func (options mobileOptions) geoURLs() (string, string) {
@@ -156,6 +166,20 @@ func Configure(raw string) error {
 	if options.PingMethod != "tcp" && options.PingMethod != "head" && options.PingMethod != "get" {
 		return errors.New("Неизвестный метод проверки задержки")
 	}
+	switch options.IPType {
+	case "":
+		options.IPType = "auto"
+	case "auto", "ipv4":
+	case "ipv6":
+		if !options.IPv6 {
+			return errors.New("Для типа IP «IPv6» включите IPv6 в туннеле")
+		}
+	default:
+		return errors.New("Неизвестный тип IP")
+	}
+	if options.MemoryLimitMB != 0 && (options.MemoryLimitMB < 32 || options.MemoryLimitMB > 1024) {
+		return errors.New("Лимит памяти должен быть от 32 до 1024 МБ")
+	}
 	if _, _, err := selectedDNSWithDoH(options.DNSID, options.CustomDNS, options.DoHURL); err != nil {
 		return err
 	}
@@ -170,10 +194,21 @@ func Configure(raw string) error {
 	if _, err := newRoutingOptions(options.RoutingMode, options.RoutingRules, geoIP, geoSite); err != nil {
 		return err
 	}
+	applyMemoryLimit(options.MemoryLimitMB)
 	mobile.Lock()
 	defer mobile.Unlock()
 	mobile.options = options
 	return nil
+}
+
+// applyMemoryLimit makes the GC work harder near the limit instead of
+// letting the heap grow; it never fails an allocation.
+func applyMemoryLimit(megabytes int) {
+	if megabytes <= 0 {
+		debug.SetMemoryLimit(math.MaxInt64)
+		return
+	}
+	debug.SetMemoryLimit(int64(megabytes) << 20)
 }
 
 // PingProfiles checks all imported servers and returns display-safe JSON.
@@ -230,7 +265,13 @@ func ImportSubscriptions(addressesJSON string) (string, error) {
 type importSources struct {
 	URLs   []string `json:"urls"`
 	Manual string   `json:"manual"`
+	// SendHWID set to false omits the X-Hwid header from subscription
+	// requests. Missing means true, as before the option existed.
+	SendHWID *bool `json:"sendHwid"`
 }
+
+// hideHWID is read while subscriptions download; imports never overlap.
+var hideHWID atomic.Bool
 
 // ImportSources downloads subscription URLs and parses manually added
 // configs (Xray JSON or share links), merging them into one server list.
@@ -257,6 +298,7 @@ func ImportSources(sourcesJSON string) (string, error) {
 	}
 	mobile.importing = true
 	directory := mobile.dataDir
+	hideHWID.Store(sources.SendHWID != nil && !*sources.SendHWID)
 	mobile.Unlock()
 	defer func() { mobile.Lock(); mobile.importing = false; mobile.Unlock() }()
 

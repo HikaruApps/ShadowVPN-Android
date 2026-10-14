@@ -41,8 +41,8 @@ Three layers, all in one process:
 1. **UI — WebView SPA** (`app/src/main/assets/shadowvpn/`: `index.html`, `app.js`,
    `styles.css`, flag SVGs, `logo.png`). Not native Android views. Opening
    `index.html` in a desktop browser renders mock data (no `window.ShadowVpnAndroid`);
-   query params `?disconnected`, `?error`, `?lite`, `?preview=servers|menu|welcome|settings|
-   subscriptions|logs|connection|split|application|about|auto` open specific screens.
+   query params `?disconnected`, `?error`, `?blocked`, `?lite`, `?preview=servers|menu|welcome|settings|
+   subscriptions|logs|connection|tunnel|split|application|about|auto` open specific screens.
    Long lists (servers, apps, Auto servers) are paged in via `lazyList`; the
    `html.lite` class (low RAM/CPU devices) disables shadows and animations.
 2. **Java host** (`app/src/main/java/net/shadownet/shadowvpn/android/`)

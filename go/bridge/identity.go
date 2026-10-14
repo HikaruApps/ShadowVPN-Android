@@ -23,11 +23,16 @@ func hashedHWID(seed string) string {
 }
 
 func currentDeviceInfo() deviceInfo {
+	if hideHWID.Load() {
+		return deviceInfo{UserAgent: appUserAgent, OS: runtime.GOOS}
+	}
 	return deviceInfo{HWID: deviceHWID(), UserAgent: appUserAgent, OS: runtime.GOOS}
 }
 
 func setClientIdentityHeaders(request *http.Request, info deviceInfo) {
 	request.Header.Set("User-Agent", info.UserAgent)
-	request.Header.Set("X-Hwid", info.HWID)
+	if info.HWID != "" {
+		request.Header.Set("X-Hwid", info.HWID)
+	}
 	request.Header.Set("X-Device-Os", info.OS)
 }
