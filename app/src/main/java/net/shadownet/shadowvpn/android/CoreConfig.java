@@ -56,7 +56,7 @@ final class CoreConfig {
         options.put("subscriptionRules", preferences.getBoolean("subscription_rules", true));
         options.put("geoipUrl", preferences.getString("geoip_url", ""));
         options.put("geositeUrl", preferences.getString("geosite_url", ""));
-        options.put("pingMethod", preferences.getString("ping_method", "tcp"));
+        options.put("pingMethod", pingMethod(preferences));
         options.put("mux", preferences.getBoolean("mux", false));
         options.put("ipType", preferences.getString("ip_type", "auto"));
         options.put("routeOnly", preferences.getBoolean("route_only", false));
@@ -164,6 +164,15 @@ final class CoreConfig {
         StringBuilder password = new StringBuilder();
         for (int i = 0; i < 16; i++) password.append(alphabet.charAt(random.nextInt(alphabet.length())));
         editor.putString("proxy_user", user.toString()).putString("proxy_pass", password.toString());
+    }
+
+    /**
+     * "real" sends a request through each server; "tcp" only checks that its
+     * port is open. A new key, so everyone moves off the old TCP default that
+     * showed servers as working when nothing loaded through them.
+     */
+    static String pingMethod(SharedPreferences preferences) {
+        return "tcp".equals(preferences.getString("ping_mode", "real")) ? "tcp" : "real";
     }
 
     static int memoryLimit(SharedPreferences preferences) {

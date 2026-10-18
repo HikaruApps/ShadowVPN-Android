@@ -75,9 +75,10 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 		if len(candidates) == 0 {
 			return nil, nil, errors.New(empty)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		results := pingProfiles(ctx, candidates)
+		// Only servers that pass a real check through them can be first.
+		results := verifiedPingProfiles(ctx, candidates, options.Fragmentation)
 		prepared, _, _, err := prepareAutoProfiles(ctx, candidates, results)
 		if err != nil {
 			return nil, nil, err
@@ -163,7 +164,7 @@ func startDetached(config []byte, naive *naiveRuntime) (*core.Instance, detached
 			return nil, detachedInbounds{}, err
 		}
 	}
-	instance, err := core.New(parsed)
+	instance, err := newXrayInstance(parsed)
 	if err != nil {
 		return nil, detachedInbounds{}, err
 	}
@@ -293,14 +294,23 @@ func switchSession(profileID string, reload bool) error {
 	if err != nil {
 		return err
 	}
+	// The new instance owns the process-wide dialer state from its creation
+	// until it either takes over or is dropped; probes wait meanwhile.
+	// Lock order: xrayDialerMu before mobile.
+	xrayDialerMu.Lock()
+	defer xrayDialerMu.Unlock()
 	instance, inbounds, err := startDetached(config, naive)
 	if err != nil {
 		closeNaive(naive)
+		restoreActiveDialer()
 		return err
 	}
 	if err := probeInstance(instance, 10*time.Second); err != nil {
 		_ = instance.Close()
 		closeNaive(naive)
+		// The new instance took over the process-wide dialer state when it
+		// was created; the server in use must get it back.
+		restoreActiveDialer()
 		if reload {
 			return fmt.Errorf("Сервер не отвечает: %v", err)
 		}
@@ -328,6 +338,7 @@ func switchSession(profileID string, reload bool) error {
 	}
 	closeNaive(oldNaive)
 	mobile.instance, mobile.naive, mobile.profileID = instance, naive, profileID
+	activateDialer(instance)
 	return nil
 }
 
