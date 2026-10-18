@@ -42,7 +42,7 @@ Three layers, all in one process:
    `styles.css`, flag SVGs, `logo.png`). Not native Android views. Opening
    `index.html` in a desktop browser renders mock data (no `window.ShadowVpnAndroid`);
    query params `?disconnected`, `?error`, `?blocked`, `?lite`, `?preview=servers|menu|welcome|settings|
-   subscriptions|logs|connection|tunnel|proxy|split|application|about|auto` open specific screens.
+   subscriptions|logs|providers|ping|auto|connection|network|tunnel|routing|proxy|split|application|about` open specific screens.
    Long lists (servers, apps, Auto servers) are paged in via `lazyList`; the
    `html.lite` class (low RAM/CPU devices) disables shadows and animations.
 2. **Java host** (`app/src/main/java/net/shadownet/shadowvpn/android/`)
@@ -77,7 +77,12 @@ Three layers, all in one process:
      runtime config: DNS through `dns-out`, rule ordering, subscription rules, dialer
      chains, GeoData, warning-level log; no local listeners unless the opt-in local proxy is on),
      `local_proxy.go` (SOCKS5/HTTP inbounds that always require a login/password, optional
-     `0.0.0.0` for hotspot clients, TUN rules extended to them, phone loopback blocked), `cache.go` (profile cache,
+     `0.0.0.0` for hotspot clients, TUN rules extended to them, phone loopback blocked),
+     `realping.go` (server check through the server's own outbound with chains/fragmentation,
+     two HTTPS requests; `verifiedPingProfiles` = TCP for all, real check of the fastest, used by
+     Auto and balancers), `xray_dialer.go` (Xray's process-wide dialer state: every `core.New`
+     claims it, so probes hand it back to the running VPN and chain probes/switches serialize),
+     `cache.go` (profile cache,
      GeoData download with codes recorded in `meta.json`).
    - `subscription.go` (share links), `dns.go`, `bootstrap.go`, `auto.go`, `ping.go`,
      `geodata.go`, `identity.go` are shared with the desktop client; prefer keeping them

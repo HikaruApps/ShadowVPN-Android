@@ -164,7 +164,9 @@ func Configure(raw string) error {
 	if options.TunMTU < 1280 || options.TunMTU > 1500 {
 		return errors.New("MTU туннеля должен быть от 1280 до 1500")
 	}
-	if options.PingMethod != "tcp" && options.PingMethod != "head" && options.PingMethod != "get" {
+	switch options.PingMethod {
+	case "real", "tcp", "head", "get":
+	default:
 		return errors.New("Неизвестный метод проверки задержки")
 	}
 	switch options.IPType {
@@ -224,6 +226,7 @@ func PingProfiles(method string) (string, error) {
 		return "", errors.New("Проверка недоступна во время обновления подписки")
 	}
 	profiles := append([]Profile(nil), mobile.profiles...)
+	fragmentation := mobile.options.Fragmentation
 	mobile.Unlock()
 	if len(profiles) == 0 {
 		return "[]", nil
@@ -231,10 +234,21 @@ func PingProfiles(method string) (string, error) {
 	if method == "" {
 		method = "tcp"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	flat, _ := flattenGroups(profiles)
-	results := pingProfilesWithAutoMethod(ctx, flat, method)
+	var results []PingResult
+	switch method {
+	case "real", "head", "get":
+		// Enough time for every server to get its own full check.
+		rounds := (len(flat) + realPingWorkers - 1) / realPingWorkers
+		timeout := min(max(45*time.Second, time.Duration(rounds)*realPingTimeout+5*time.Second), 3*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		results = withAutoPingResults(flat, realPingProfiles(ctx, flat, fragmentation))
+	default:
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		results = pingProfilesWithAutoMethod(ctx, flat, method)
+	}
 	// A balancer is as fast as its fastest reachable server.
 	for _, profile := range profiles {
 		if len(profile.members) == 0 {
@@ -502,6 +516,7 @@ func startPrepared(tunFD int) error {
 		return err
 	}
 	mobile.instance, mobile.naive, mobile.tunFD = instance, naive, tunFD
+	activateDialer(instance)
 	startWatchdogLocked()
 	return nil
 }

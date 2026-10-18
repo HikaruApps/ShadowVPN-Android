@@ -449,7 +449,7 @@ public final class MainActivity extends Activity {
         pingRunning = true;
         pingResults.clear();
         pushSnapshot();
-        String method = preferences.getString("ping_method", "tcp");
+        String method = CoreConfig.pingMethod(preferences);
         worker.execute(() -> {
             try {
                 JSONArray results = new JSONArray(Bridge.pingProfiles(method));
@@ -755,7 +755,7 @@ public final class MainActivity extends Activity {
                 doh.isEmpty() ? "cloudflare" : "subscription-doh"));
         value.put("routingMode", preferences.getString("routing_mode", "full"));
         value.put("routingRules", preferences.getString("routing_rules", ""));
-        value.put("pingMethod", preferences.getString("ping_method", "tcp"));
+        value.put("pingMethod", CoreConfig.pingMethod(preferences));
         value.put("fragmentation", preferences.getBoolean("fragmentation", false));
         value.put("mux", preferences.getBoolean("mux", false));
         value.put("ipType", preferences.getString("ip_type", "auto"));
@@ -899,8 +899,8 @@ public final class MainActivity extends Activity {
             editor.putString("custom_dns", value.optString("customDns", "").trim());
             editor.putString("routing_mode", allowed(value.optString("routingMode"),
                     new String[]{"full", "bypass", "proxy_only"}, "full"));
-            editor.putString("ping_method", allowed(value.optString("pingMethod"),
-                    new String[]{"tcp", "head", "get"}, "tcp"));
+            editor.putString("ping_mode", allowed(value.optString("pingMethod"),
+                    new String[]{"real", "tcp"}, "real"));
             editor.putBoolean("fragmentation", value.optBoolean("fragmentation", false));
             editor.putBoolean("mux", value.optBoolean("mux", false));
             String ipType = allowed(value.optString("ipType"),
