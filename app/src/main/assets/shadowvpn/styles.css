@@ -87,6 +87,9 @@ img{display:block}
    transform, без перерисовки самого круга. */
 .power::before{content:"";position:absolute;inset:0;border-radius:50%;box-shadow:0 0 0 8px var(--ring-color);opacity:0;transform:scale(.9);pointer-events:none;transition:opacity 170ms var(--ease-out),transform 220ms var(--ease-spring);will-change:transform,opacity;backface-visibility:hidden;-webkit-backface-visibility:hidden}
 .power svg{width:44%;height:44%;stroke-width:1.6}
+/* Traffic glow (connected): a soft halo behind the button whose strength is
+   --glow (0..1) from the live speed. Only opacity and transform change. */
+.power::after{content:"";position:absolute;inset:-22%;z-index:-1;border-radius:50%;background:radial-gradient(circle,rgba(63,185,80,.32) 0%,rgba(63,185,80,.12) 45%,transparent 70%);opacity:calc(var(--glow,0) * .9);transform:scale(calc(.82 + var(--glow,0) * .26));transition:opacity 800ms var(--ease-out),transform 800ms var(--ease-out);pointer-events:none;will-change:opacity,transform}
 .power:active:not(:disabled){transform:scale(.97)}
 .power:disabled{opacity:1}
 .app[data-state="connected"] .power{--ring-color:var(--success-soft);border-color:var(--success);color:var(--text)}
@@ -149,6 +152,8 @@ button,label,select,input,textarea{touch-action:manipulation}
 /* Во время проверки анимируется только кнопка пинга: десятки отдельных
    пульсаций на карточках съедали бы кадры на слабых устройствах. */
 .latency.pending{color:var(--text-3)}
+/* Restored from the last run, not measured yet in this one. */
+.latency.cached{opacity:.5}
 
 /* ---------- Sheets ---------- */
 /* Затемнение и лист анимируются раздельно: иначе opacity родителя тянул за
@@ -344,6 +349,7 @@ textarea.field[rows="2"]{height:68px}
    responsive instead of frozen. */
 .lite *,.lite *::before,.lite *::after{box-shadow:none!important;animation:none!important}
 .lite .loading i{animation:spin 800ms linear infinite!important}
+.lite .power::after{display:none}
 .lite .power svg,.lite .ip-pill .dot,.lite #pingButton.running svg{animation:pulse 1.5s ease-in-out infinite!important}
 .lite .icon-button,.lite .server-picker,.lite .button,.lite .row,.lite .server-card,.lite .switch::before,.lite .switch::after,.lite .quota-track i,.lite .sheet-header,.lite .chips,.lite .panel-header,.lite .chips button,.lite .chip-indicator,.lite .popover button{transition:none!important}
 .lite{--sheet-open-ms:200ms;--sheet-close-ms:160ms;--scrim-open-ms:180ms;--scrim-close-ms:140ms}

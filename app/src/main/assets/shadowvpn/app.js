@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id);
   const hasNativeBridge = !!window.ShadowVpnAndroid;
   const native = window.ShadowVpnAndroid || {
-    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {},
+    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {},
     saveSubscriptions() {}, saveSettings() {}, getLogs() { return ""; }, copyText() {}, openVpnSettings() {},
     getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}, resetProxyCredentials() {}
   };
@@ -183,10 +183,12 @@
   }
 
   function latencyText(server) {
-    if (snapshot.pingRunning && server.latency == null) return { text: "•••", cls: "pending" };
+    if (server.checking || (snapshot.pingRunning && server.latency == null)) return { text: "•••", cls: "pending" };
     if (server.latency == null) return { text: "", cls: "" };
-    if (!server.available) return { text: "—", cls: "bad" };
-    return { text: `${server.latency} мс`, cls: server.latency < 180 ? "good" : server.latency < 450 ? "medium" : "bad" };
+    // Restored from the last run: shown, but dimmed until checked again.
+    const cached = server.cached ? " cached" : "";
+    if (!server.available) return { text: "—", cls: `bad${cached}` };
+    return { text: `${server.latency} мс`, cls: (server.latency < 180 ? "good" : server.latency < 450 ? "medium" : "bad") + cached };
   }
 
   function quotaBytes(value) {
@@ -405,6 +407,8 @@
     if (!server) return;
     server.latency = item.latency;
     server.available = item.available;
+    server.cached = !!item.cached;
+    server.checking = false;
     cardsDirty = true;
     const card = serverCards.get(item.id);
     if (card) {
@@ -431,11 +435,42 @@
       { duration: 450, easing: "cubic-bezier(.34,1.56,.64,1)" });
   }
 
+  // The connect button glows with the live traffic, like Hiddify's corona:
+  // the light follows a rise quickly (about 0.8 s) and fades slowly (about
+  // 2.5 s), on a log scale so a page load and a download both show.
+  let glowLevel = 0;
+  let glowTimer = 0;
+  function trafficLevel() {
+    const rate = (Number(snapshot.traffic?.downloadRate) || 0) + (Number(snapshot.traffic?.uploadRate) || 0);
+    // 0 at idle, 1 at about 10 MB/s.
+    return Math.min(1, Math.log10(1 + rate / 1024) / 4);
+  }
+  function updateGlow(connected) {
+    const power = $("powerButton");
+    if (!connected || noMotion()) {
+      clearInterval(glowTimer); glowTimer = 0; glowLevel = 0;
+      power.style.removeProperty("--glow");
+      return;
+    }
+    const step = () => {
+      const target = trafficLevel();
+      // Rise at once (CSS smooths it); decay with a 2.5 s time constant.
+      glowLevel = target >= glowLevel ? target : target + (glowLevel - target) * Math.exp(-0.5 / 2.5);
+      const value = glowLevel < 0.01 ? "0" : glowLevel.toFixed(2);
+      if (power.style.getPropertyValue("--glow") !== value) power.style.setProperty("--glow", value);
+    };
+    step();
+    // Snapshots stop when nothing changes; the fade must not stop with them.
+    if (!glowTimer) glowTimer = setInterval(step, 500);
+  }
+
   /** A new check starts: every host waits for its own answer again. */
   function clearPingResults() {
     for (const server of serverModels.values()) {
       delete server.latency;
       delete server.available;
+      delete server.cached;
+      delete server.checking;
     }
     cardsDirty = true;
     updateMountedCards();
@@ -574,6 +609,7 @@
     power.disabled = connecting || !snapshot.selected || !!snapshot.switchingTo;
     power.setAttribute("aria-label", connected || state === "blocked" ? "Отключить VPN" : "Подключить VPN");
     renderStatus(connected, connecting);
+    updateGlow(connected);
 
     setText("ipLabel", connected ? "Защищённый IP" : "IP");
     setText("ipValue", snapshot.publicIp || (connecting || state === "blocked" ? "—" : "Определяем…"));
@@ -1652,6 +1688,15 @@
   serverList.addEventListener("click", event => {
     const card = event.target.closest(".server-card");
     if (!card || !serverList.contains(card)) return;
+    // A tap on the latency checks this one server again instead of picking it.
+    const server = serverModels.get(card.dataset.id);
+    if (event.target.closest(".latency") && server && !server.auto && !snapshot.pingRunning && native.pingServer) {
+      if (server.checking) return;
+      server.checking = true;
+      updateServerCard(card, server);
+      native.pingServer(server.id);
+      return;
+    }
     native.selectServer(card.dataset.id);
     window.setTimeout(closeServers, 110);
   });
@@ -1744,8 +1789,12 @@
   // The preview is a still picture: it has no time to wait for the opening
   // animation, so the layers are put into their final state right away.
   document.documentElement.classList.add("no-anim");
-  serverScrim.classList.add("open");
-  serverSheet.classList.add("open");
-  panelOverlay.classList.add("open");
-  panel.classList.add("open");
+  if (sheetOpen) {
+    serverScrim.classList.add("open");
+    serverSheet.classList.add("open");
+  }
+  if (!panelOverlay.hidden) {
+    panelOverlay.classList.add("open");
+    panel.classList.add("open");
+  }
 })();

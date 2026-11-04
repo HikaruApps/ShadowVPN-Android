@@ -14,6 +14,8 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.drawable.Drawable;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.TrafficStats;
 import android.net.Uri;
 import android.net.VpnService;
@@ -116,6 +118,18 @@ public final class MainActivity extends Activity {
     private String uploadSpeed = "0 Б/с";
     private String downloadTotal = "0 Б";
     private String uploadTotal = "0 Б";
+    // Raw rates for the connect button's glow; the strings above are for text.
+    private long downloadRate;
+    private long uploadRate;
+    // Latencies restored from the last run: shown dimmed until checked again.
+    private boolean pingResultsCached;
+    // Re-check after the phone moved to another network (as Hiddify does):
+    // latencies from Wi-Fi say nothing about mobile data.
+    private ConnectivityManager.NetworkCallback networkWatcher;
+    private Network watchedNetwork;
+    private final Runnable networkRecheck = () -> {
+        if (!pingRunning && !pingResults.isEmpty()) runPings();
+    };
 
     private final Runnable statusUpdater = new Runnable() {
         @Override public void run() {
@@ -204,11 +218,44 @@ public final class MainActivity extends Activity {
         ui.post(statusUpdater);
         ui.post(this::pushSnapshot);
         ui.postDelayed(this::maybeAutoUpdate, 1200);
+        watchNetwork();
     }
 
     @Override protected void onPause() {
         ui.removeCallbacks(statusUpdater);
+        unwatchNetwork();
         super.onPause();
+    }
+
+    private void watchNetwork() {
+        ConnectivityManager manager = getSystemService(ConnectivityManager.class);
+        if (manager == null || networkWatcher != null) return;
+        networkWatcher = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) {
+                ui.post(() -> {
+                    Network previous = watchedNetwork;
+                    watchedNetwork = network;
+                    // The first callback reports the current network.
+                    if (previous == null || previous.equals(network)) return;
+                    ui.removeCallbacks(networkRecheck);
+                    ui.postDelayed(networkRecheck, 2000);
+                });
+            }
+        };
+        try {
+            manager.registerDefaultNetworkCallback(networkWatcher);
+        } catch (RuntimeException error) {
+            networkWatcher = null;
+        }
+    }
+
+    private void unwatchNetwork() {
+        ui.removeCallbacks(networkRecheck);
+        if (networkWatcher == null) return;
+        try {
+            getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networkWatcher);
+        } catch (RuntimeException ignored) { }
+        networkWatcher = null;
     }
 
     @Override protected void onDestroy() {
@@ -261,6 +308,7 @@ public final class MainActivity extends Activity {
                     try { applyServers(parseServers(new JSONObject(result))); }
                     catch (Exception ignored) { }
                 }
+                restorePingCache();
                 boolean refresh = hasSources() && (servers.isEmpty()
                         || !launchUpdateDone && preferences.getBoolean("update_on_open", false));
                 launchUpdateDone = true;
@@ -473,6 +521,7 @@ public final class MainActivity extends Activity {
         if (pingRunning) return;
         pingRunning = true;
         pingResults.clear();
+        pingResultsCached = false;
         pendingPingDeltas.clear();
         if (webReady && webView != null) {
             webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.pingStarted()", null);
@@ -644,6 +693,7 @@ public final class MainActivity extends Activity {
                     .append("\"id\":").append(JSONObject.quote(delta.id))
                     .append(",\"latency\":").append(delta.latency)
                     .append(",\"available\":").append(delta.available)
+                    .append(",\"cached\":").append(delta.cached)
                     .append("});");
         }
         pendingPingDeltas.clear();
@@ -653,14 +703,83 @@ public final class MainActivity extends Activity {
     private void requeuePingResults() {
         for (Map.Entry<String, PingData> entry : pingResults.entrySet()) {
             pendingPingDeltas.add(new PingDelta(entry.getKey(),
-                    entry.getValue().latency, entry.getValue().available));
+                    entry.getValue().latency, entry.getValue().available, pingResultsCached));
         }
         schedulePingFlush();
     }
 
     private void finishPings() {
         pingRunning = false;
+        savePingCache();
         pushSnapshot();
+    }
+
+    private static final long PING_CACHE_MAX_AGE = 24L * 60 * 60 * 1000;
+
+    /** Keeps the last latencies so the list is not blank on the next start. */
+    private void savePingCache() {
+        try {
+            JSONObject results = new JSONObject();
+            for (Map.Entry<String, PingData> entry : pingResults.entrySet()) {
+                results.put(entry.getKey(), new JSONArray()
+                        .put(entry.getValue().latency).put(entry.getValue().available));
+            }
+            JSONObject cache = new JSONObject()
+                    .put("at", System.currentTimeMillis())
+                    .put("method", CoreConfig.pingMethod(preferences))
+                    .put("results", results);
+            preferences.edit().putString("ping_cache", cache.toString()).apply();
+        } catch (Exception ignored) { }
+    }
+
+    private void restorePingCache() {
+        if (pingRunning || !pingResults.isEmpty()) return;
+        try {
+            JSONObject cache = new JSONObject(preferences.getString("ping_cache", "{}"));
+            long age = System.currentTimeMillis() - cache.optLong("at", 0);
+            // Old results, or ones from the other method, would only mislead.
+            if (age < 0 || age > PING_CACHE_MAX_AGE
+                    || !CoreConfig.pingMethod(preferences).equals(cache.optString("method"))) return;
+            JSONObject results = cache.getJSONObject("results");
+            for (java.util.Iterator<String> keys = results.keys(); keys.hasNext(); ) {
+                String id = keys.next();
+                JSONArray value = results.getJSONArray(id);
+                pingResults.put(id, new PingData(value.optLong(0), value.optBoolean(1)));
+            }
+            pingResultsCached = !pingResults.isEmpty();
+            requeuePingResults();
+        } catch (Exception ignored) { }
+    }
+
+    /**
+     * Checks one server on request, the way Hiddify does for a tap: a quick
+     * failure gets a second attempt from the 3rd second on, so a transient
+     * drop does not mark a working server dead. Either way it ends within
+     * about 10 seconds plus the attempt itself.
+     */
+    private void pingServer(String id) {
+        if (pingRunning || id == null || id.isEmpty()) return;
+        String method = CoreConfig.pingMethod(preferences);
+        pingRunner.execute(() -> {
+            long started = SystemClock.elapsedRealtime();
+            PingResult result = pingOne(new PingHost(id, "", false), method);
+            long elapsed = SystemClock.elapsedRealtime() - started;
+            if (!result.data.available && elapsed < 5000) {
+                try {
+                    Thread.sleep(Math.max(0, 3000 - elapsed));
+                } catch (InterruptedException interrupted) {
+                    return;
+                }
+                result = pingOne(new PingHost(id, "", false), method);
+            }
+            PingResult answer = result;
+            ui.post(() -> {
+                pingResults.put(answer.id, answer.data);
+                List<PingDelta> update = new ArrayList<>();
+                update.add(new PingDelta(answer.id, answer.data.latency, answer.data.available));
+                applyPingUpdate(update);
+            });
+        });
     }
 
     private void failPings() {
@@ -763,6 +882,7 @@ public final class MainActivity extends Activity {
             serviceWarningGeneration++;
             connectedAt = 0;
             downloadSpeed = uploadSpeed = "0 Б/с";
+            downloadRate = uploadRate = 0;
             downloadTotal = uploadTotal = "0 Б";
             if (wasConnected) {
                 publicIp = "";
@@ -841,8 +961,10 @@ public final class MainActivity extends Activity {
         long rx = safeTraffic(TrafficStats.getUidRxBytes(getApplicationInfo().uid));
         long tx = safeTraffic(TrafficStats.getUidTxBytes(getApplicationInfo().uid));
         long elapsed = Math.max(1, now - trafficLastAt);
-        downloadSpeed = formatBytes(Math.max(0, rx - trafficLastRx) * 1000 / elapsed) + "/с";
-        uploadSpeed = formatBytes(Math.max(0, tx - trafficLastTx) * 1000 / elapsed) + "/с";
+        downloadRate = Math.max(0, rx - trafficLastRx) * 1000 / elapsed;
+        uploadRate = Math.max(0, tx - trafficLastTx) * 1000 / elapsed;
+        downloadSpeed = formatBytes(downloadRate) + "/с";
+        uploadSpeed = formatBytes(uploadRate) + "/с";
         downloadTotal = formatBytes(Math.max(0, rx - trafficStartedRx));
         uploadTotal = formatBytes(Math.max(0, tx - trafficStartedTx));
         trafficLastRx = rx;
@@ -948,6 +1070,8 @@ public final class MainActivity extends Activity {
             traffic.put("downloadTotal", downloadTotal);
             traffic.put("uploadSpeed", uploadSpeed);
             traffic.put("uploadTotal", uploadTotal);
+            traffic.put("downloadRate", downloadRate);
+            traffic.put("uploadRate", uploadRate);
             root.put("traffic", traffic);
         } catch (Exception ignored) { }
         return root;
@@ -1321,6 +1445,10 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void pingServers() { ui.post(MainActivity.this::runPings); }
+        // Qualified, or the call would resolve to this bridge method itself.
+        @JavascriptInterface public void pingServer(String id) {
+            ui.post(() -> MainActivity.this.pingServer(id));
+        }
 
         @JavascriptInterface public void saveSubscriptions(String json) {
             ui.post(() -> {
@@ -1703,11 +1831,18 @@ public final class MainActivity extends Activity {
         final String id;
         final long latency;
         final boolean available;
+        /** Restored from the last run rather than measured now. */
+        final boolean cached;
 
         PingDelta(String id, long latency, boolean available) {
+            this(id, latency, available, false);
+        }
+
+        PingDelta(String id, long latency, boolean available, boolean cached) {
             this.id = id;
             this.latency = latency;
             this.available = available;
+            this.cached = cached;
         }
     }
 
