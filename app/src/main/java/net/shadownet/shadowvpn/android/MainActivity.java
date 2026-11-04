@@ -932,9 +932,9 @@ public final class MainActivity extends Activity {
             }
             diagnosticStep("vpn", "running", "");
             try {
-                diagnosticStep("vpn", "ok", "Интернет через VPN работает · IP " + maskIp(Bridge.publicIP()));
+                diagnosticStep("vpn", "ok", "Работает · ваш IP " + maskIp(Bridge.publicIP()));
             } catch (Exception error) {
-                diagnosticStep("vpn", "fail", "Через туннель нет интернета: " + cleanError(error));
+                diagnosticStep("vpn", "fail", "Не работает: " + maskIps(cleanError(error)));
             }
         });
     }
@@ -962,7 +962,7 @@ public final class MainActivity extends Activity {
         ui.post(() -> {
             if (!webReady || webView == null) return;
             try {
-                JSONObject step = new JSONObject().put("id", id).put("state", state).put("detail", detail);
+                JSONObject step = new JSONObject().put("id", id).put("state", state).put("detail", maskIps(detail));
                 webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.diagnosticsStep("
                         + step + ")", null);
             } catch (Exception ignored) { }
@@ -1323,9 +1323,9 @@ public final class MainActivity extends Activity {
                     : ShadowVpnService.status.startsWith("Ошибка") ? "error" : "disconnected";
             root.put("state", state);
             root.put("switchingTo", switchingTo);
-            root.put("serviceStatus", ShadowVpnService.status);
-            root.put("message", uiMessage);
-            root.put("publicIp", connected ? maskIp(publicIp) : publicIp);
+            root.put("serviceStatus", maskIps(ShadowVpnService.status));
+            root.put("message", maskIps(uiMessage));
+            root.put("publicIp", maskIp(publicIp));
             root.put("session", connected ? formatDuration(
                     Math.max(0, SystemClock.elapsedRealtime() - connectedAt) / 1000) : "00:00:00");
             JSONObject traffic = new JSONObject();
@@ -1768,7 +1768,7 @@ public final class MainActivity extends Activity {
             String core = "";
             try { core = Bridge.logs(); } catch (Exception ignored) { }
             String app = ShadowVpnService.getLogs();
-            return core.trim().isEmpty() ? app : app + "\n— Xray —\n" + core;
+            return maskIps(core.trim().isEmpty() ? app : app + "\n— Xray —\n" + core);
         }
 
         @JavascriptInterface public void copyText(String value) {
@@ -2006,12 +2006,33 @@ public final class MainActivity extends Activity {
                 seconds / 3600, (seconds % 3600) / 60, seconds % 60);
     }
 
-    private String maskIp(String ip) {
+    /** Hides the host part of an address: the last two octets, or IPv6 after two groups. */
+    static String maskIp(String ip) {
         if (ip == null || ip.isEmpty()) return "";
-        int lastDot = ip.lastIndexOf('.');
-        if (lastDot > 0) return ip.substring(0, lastDot + 1) + "***";
-        int colon = ip.indexOf(':');
-        return colon > 0 ? ip.substring(0, colon) + ":****:****" : ip;
+        String value = ip.trim();
+        if (value.indexOf(':') < 0) return maskIps(value);
+        String[] groups = value.split(":", 3);
+        return groups.length < 3 ? "*" : groups[0] + ":" + groups[1] + ":*:*";
+    }
+
+    private static final java.util.regex.Pattern IPV4 = java.util.regex.Pattern.compile(
+            "\\b(\\d{1,3})\\.(\\d{1,3})\\.\\d{1,3}\\.\\d{1,3}\\b");
+
+    /** Masks public IPv4 addresses inside text; local ones identify no one. */
+    static String maskIps(String text) {
+        if (text == null || text.isEmpty()) return text == null ? "" : text;
+        java.util.regex.Matcher matcher = IPV4.matcher(text);
+        StringBuffer result = new StringBuffer();
+        while (matcher.find()) {
+            int a = Integer.parseInt(matcher.group(1));
+            int b = Integer.parseInt(matcher.group(2));
+            boolean local = a == 127 || a == 10 || a == 0 || (a == 192 && b == 168)
+                    || (a == 172 && b >= 16 && b <= 31) || (a == 169 && b == 254);
+            matcher.appendReplacement(result, local ? matcher.group()
+                    : matcher.group(1) + "." + matcher.group(2) + ".*.*");
+        }
+        matcher.appendTail(result);
+        return result.toString();
     }
 
     private String cleanError(Exception error) {

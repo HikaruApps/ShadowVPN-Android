@@ -21,6 +21,7 @@ import java.net.InetAddress;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -53,10 +54,23 @@ public final class ShadowVpnService extends VpnService {
     // Bumped by every connect and stop, so a stale retry never fires.
     private volatile long retryGeneration;
     private int retryAttempt;
+    // Every start request gets a number; a stop cancels all requests made
+    // before it at once, even while the connect is still running.
+    private volatile long requests;
+    private volatile long cancelledUpTo;
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
         if (STOP.equals(action)) {
+            cancelledUpTo = requests;
+            retryGeneration++;
+            if (!connected) {
+                // A connect in progress is abandoned: show it as off now, not
+                // when the server finally answers.
+                status = "Отключено";
+                blocked = false;
+                VpnControl.refreshSurfaces(this);
+            }
             executor.execute(() -> {
                 closeTunnel(true);
                 stopForeground(STOP_FOREGROUND_REMOVE);
@@ -69,11 +83,14 @@ public final class ShadowVpnService extends VpnService {
         createForegroundNotification();
         status = "Подключение…";
         VpnControl.refreshSurfaces(this);
-        executor.execute(this::connect);
+        long request = ++requests;
+        executor.execute(() -> connect(request));
         return START_NOT_STICKY;
     }
 
-    private void connect() {
+    private void connect(long request) {
+        // Cancelled before it started: the queued stop cleans up.
+        if (request <= cancelledUpTo) return;
         retryGeneration++;
         warning = "";
         SharedPreferences preferences = CoreConfig.preferences(this);
@@ -103,6 +120,7 @@ public final class ShadowVpnService extends VpnService {
             long phase = SystemClock.elapsedRealtime();
             Bridge.prepare(profileId);
             addLog("Сервер подготовлен за " + seconds(phase));
+            if (request <= cancelledUpTo) throw new CancellationException();
             phase = SystemClock.elapsedRealtime();
             try {
                 String lastWarning = Bridge.lastWarning();
@@ -117,6 +135,7 @@ public final class ShadowVpnService extends VpnService {
                 if (!killSwitch) establishTunnel(preferences);
                 Bridge.start(tunnel.getFd());
             }
+            if (request <= cancelledUpTo) throw new CancellationException();
             connected = true;
             blocked = false;
             retryAttempt = 0;
@@ -128,6 +147,13 @@ public final class ShadowVpnService extends VpnService {
             watchNetwork();
             VpnControl.refreshSurfaces(this);
         } catch (Exception error) {
+            if (request <= cancelledUpTo) {
+                addLog("Подключение отменено");
+                closeTunnel(true);
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf();
+                return;
+            }
             status = "Ошибка: " + (error.getMessage() == null
                     ? "не удалось подключиться" : error.getMessage());
             addLog(status);
@@ -151,8 +177,9 @@ public final class ShadowVpnService extends VpnService {
         addLog("Kill Switch: интернет заблокирован, повтор через " + delay + " с");
         updateNotification("Нет соединения · интернет заблокирован");
         long generation = retryGeneration;
+        long request = requests;
         retryTimer.schedule(() -> executor.execute(() -> {
-            if (generation == retryGeneration && blocked) connect();
+            if (generation == retryGeneration && blocked) connect(request);
         }), delay, TimeUnit.SECONDS);
     }
 
@@ -235,7 +262,7 @@ public final class ShadowVpnService extends VpnService {
         } catch (Exception error) {
             String message = error.getMessage() == null ? "неизвестная ошибка" : error.getMessage();
             addLog("Не удалось обновить соединение: " + message);
-            if (message.startsWith("Туннель потерян")) executor.execute(this::connect);
+            if (message.startsWith("Туннель потерян")) executor.execute(() -> connect(requests));
         }
     }
 

@@ -54,3 +54,16 @@ func TestDiagnoseExplainsEachStep(t *testing.T) {
 	}
 	t.Logf("wrong key: %q", run(wrongKey.ID).Server.Detail)
 }
+
+func TestMaskIP(t *testing.T) {
+	cases := map[string]string{
+		"2.27.26.75":                    "2.27.*.*",
+		"2001:db8:85a3::8a2e:370:7334":  "2001:db8:*:*",
+		"dial tcp 2.27.26.75:443: oops": "dial tcp 2.27.*.*:443: oops",
+	}
+	for in, want := range cases {
+		if got := maskIP(in); got != want {
+			t.Errorf("maskIP(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

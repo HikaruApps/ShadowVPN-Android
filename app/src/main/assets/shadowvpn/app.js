@@ -568,8 +568,11 @@
     } else if (error) {
       const text = String(snapshot.serviceStatus || "").replace(/^Ошибка:\s*/, "") || "Не удалось подключиться";
       detail.textContent = text.charAt(0).toUpperCase() + text.slice(1);
-    } else if ((connected || connecting) && selected) {
-      detail.append(flag(selected), el("span", null, selected.name));
+    } else if (connecting) {
+      // The server is already shown in the dock below.
+      detail.textContent = "Нажмите ещё раз, чтобы отменить";
+    } else if (connected) {
+      // Nothing to add: the server is in the dock, its latency in the pill.
     } else {
       detail.textContent = selected ? "Нажмите, чтобы подключиться" : "Выберите сервер ниже";
     }
@@ -626,8 +629,10 @@
     const connected = state === "connected";
     const connecting = state === "connecting";
     const power = $("powerButton");
-    power.disabled = connecting || !snapshot.selected || !!snapshot.switchingTo;
-    power.setAttribute("aria-label", connected || state === "blocked" ? "Отключить VPN" : "Подключить VPN");
+    // Pressed while connecting, the button cancels the connection.
+    power.disabled = !connecting && (!snapshot.selected || !!snapshot.switchingTo);
+    power.setAttribute("aria-label", connecting ? "Отменить подключение"
+      : connected || state === "blocked" ? "Отключить VPN" : "Подключить VPN");
     renderStatus(connected, connecting);
 
     setText("ipLabel", connected ? "Защищённый IP" : "IP");
@@ -1746,10 +1751,11 @@
 
   // Connection check, step by step (Hiddify's connection health sheet).
   let diagnosticsRows = null;
+  let diagnosticsVerdict = null;
   const DIAGNOSTIC_STEPS = [
     ["network", "Сеть телефона", "Есть ли интернет без VPN"],
     ["dns", "Адрес сервера", "Находится ли сервер по имени"],
-    ["server", "Сервер", "Проходит ли трафик через сервер"],
+    ["server", "Доступность сервера", "Проходит ли трафик через сервер"],
     ["vpn", "Интернет через VPN", "Работает ли подключённый туннель"]
   ];
 
@@ -1767,8 +1773,11 @@
       list.append(node);
     });
     const selected = snapshot.selectedId ? serverModels.get(snapshot.selectedId) || snapshot.selected : null;
+    diagnosticsVerdict = el("div", "diag-verdict");
+    diagnosticsVerdict.append(el("b"), el("small"));
     body.append(
       el("p", "group-note", selected ? `Проверяем «${selected.name}» и путь до него.` : "Сервер не выбран: проверим только сеть."),
+      diagnosticsVerdict,
       list,
       actions(button("Проверить снова", "secondary", startDiagnostics)));
     startDiagnostics();
@@ -1786,6 +1795,34 @@
     item.node.dataset.state = step.state;
     if (step.detail) item.detail.textContent = step.detail;
     else if (step.state === "running") item.detail.textContent = "Проверяем…";
+    renderDiagnosticsVerdict();
+  }
+
+  // One plain answer above the steps: can this server be used from here.
+  function renderDiagnosticsVerdict() {
+    if (!diagnosticsVerdict) return;
+    const state = id => diagnosticsRows.get(id)?.node.dataset.state;
+    const busy = DIAGNOSTIC_STEPS.some(([id]) => ["wait", "running"].includes(state(id)));
+    let tone = "busy", title = "Проверяем…", note = "Это займёт до 10 секунд";
+    if (!busy) {
+      if (state("network") === "fail") {
+        tone = "fail"; title = "Нет интернета"; note = "Телефон не в сети: проверьте Wi-Fi или мобильные данные";
+      } else if (state("dns") === "fail") {
+        tone = "fail"; title = "Сервер не найден"; note = "Сеть не может найти адрес сервера. Смените сеть или DNS, или обновите подписку";
+      } else if (state("server") === "fail") {
+        tone = "fail"; title = "Сервер недоступен"; note = "Выберите другой сервер или обновите подписку";
+      } else if (state("vpn") === "fail") {
+        tone = "fail"; title = "VPN не пропускает интернет"; note = "Сервер доступен, но туннель не работает. Переподключитесь";
+      } else if (state("server") === "ok") {
+        tone = "ok"; title = "Сервер доступен";
+        note = state("vpn") === "ok" ? "Всё работает: интернет идёт через VPN" : "Можно подключаться";
+      } else {
+        tone = "ok"; title = "Сеть работает"; note = "Выберите сервер, чтобы проверить его";
+      }
+    }
+    diagnosticsVerdict.dataset.tone = tone;
+    diagnosticsVerdict.querySelector("b").textContent = title;
+    diagnosticsVerdict.querySelector("small").textContent = note;
   }
 
   function buildLogs(fromSettings = false) {
@@ -1964,7 +2001,7 @@
   native.getInstalledApps = () => JSON.stringify({apps: mockApps});
   render({
     state:"connected",serviceStatus:"Подключено",needsSubscription:false,importRunning:false,pingRunning:false,message:"",appVersion:"0.16.0",
-    publicIp:"132.243.***",session:"00:02:18",traffic:{downloadSpeed:"25,7 КБ/с",downloadTotal:"6,1 МБ",uploadSpeed:"58,8 КБ/с",uploadTotal:"135 КБ"},
+    publicIp:"132.243.*.*",session:"00:02:18",traffic:{downloadSpeed:"25,7 КБ/с",downloadTotal:"6,1 МБ",uploadSpeed:"58,8 КБ/с",uploadTotal:"135 КБ"},
     selectedId:mockServers[1].id,
     servers:mockServers,
     subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
@@ -1982,8 +2019,8 @@
     ({ settings:buildSettings, subscriptions:buildSubscriptions, logs:buildLogs, diagnostics:buildDiagnostics })[preview]();
     if (preview === "diagnostics") {
       diagnosticsStep({ id:"network", state:"ok", detail:"Wi-Fi · интернет есть" });
-      diagnosticsStep({ id:"dns", state:"ok", detail:"de.example.com → 203.0.113.10" });
-      diagnosticsStep({ id:"server", state:"fail", detail:"Сервер не пропускает трафик: сервер обрывает соединение. Обычно это неверный ключ или истёкшая подписка" });
+      diagnosticsStep({ id:"dns", state:"ok", detail:"Найден · de.example.com → 203.0.*.*" });
+      diagnosticsStep({ id:"server", state:"fail", detail:"Недоступен: сервер обрывает соединение. Обычно это неверный ключ или истёкшая подписка" });
       diagnosticsStep({ id:"vpn", state:"skip", detail:"VPN не подключён: подключитесь и запустите проверку снова" });
     }
   }
