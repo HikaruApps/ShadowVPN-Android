@@ -175,9 +175,40 @@ public final class MainActivity extends Activity {
     // so the user always confirms in the app first.
 
     private String pendingOffer = "";
+    private String pendingScript = "";
+    private static final int VPN_SHORTCUT_REQUEST = 103;
+
+    private void runPendingScript() {
+        if (pendingScript.isEmpty() || !webReady || webView == null) return;
+        webView.evaluateJavascript(pendingScript, null);
+        pendingScript = "";
+    }
 
     private void handleIntent(Intent intent) {
         if (intent == null) return;
+        String action = intent.getAction();
+        if (VpnControl.ACTION_DISCONNECT.equals(action)) {
+            if (VpnControl.isActive()) VpnControl.disconnect(this);
+            return;
+        }
+        if (VpnControl.ACTION_CONNECT.equals(action)) {
+            if (VpnControl.isActive()) return;
+            if (preferences.getString("selected_id", "").isEmpty()) {
+                showMessage("Сначала выберите сервер");
+                return;
+            }
+            // Servers may not be loaded yet; the service reads the saved
+            // server itself, so only the VPN permission is needed here.
+            Intent permission = CoreConfig.proxyOnly(preferences) ? null : VpnService.prepare(this);
+            if (permission != null) startActivityForResult(permission, VPN_SHORTCUT_REQUEST);
+            else VpnControl.connect(this);
+            return;
+        }
+        if (VpnControl.ACTION_SERVERS.equals(action)) {
+            pendingScript = "window.ShadowVPN&&window.ShadowVPN.openServers()";
+            runPendingScript();
+            return;
+        }
         if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) {
             String url = subscriptionFromLink(intent.getDataString());
             if (!url.isEmpty()) offerSubscription(url, "link");
@@ -239,6 +270,14 @@ public final class MainActivity extends Activity {
         webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.offerSubscription("
                 + pendingOffer + ")", null);
         pendingOffer = "";
+    }
+
+    /** The widget and the tile show the server's name without the app running. */
+    private void rememberSelectedName() {
+        ServerItem selected = findSelected();
+        preferences.edit().putString("selected_name",
+                selected == null ? "" : flagAndName(selected.name).name).apply();
+        VpnControl.refreshSurfaces(this);
     }
 
     private void showMessage(String message) {
@@ -326,6 +365,7 @@ public final class MainActivity extends Activity {
                 requeuePingResults();
                 loadCachedServers();
                 deliverPendingOffer();
+                runPendingScript();
             }
         });
         setContentView(createInsetRoot(webView));
@@ -518,6 +558,9 @@ public final class MainActivity extends Activity {
             preferences.edit().putString("selected_id", selectedId).apply();
             selectionChanged = true;
         }
+        // Also after an update renamed the server, and for installs from
+        // before the name was kept.
+        rememberSelectedName();
         if (selectionChanged) notifySelectedServer(selectedId);
         pushSnapshot();
     }
@@ -1042,6 +1085,7 @@ public final class MainActivity extends Activity {
         super.onActivityResult(request, result, data);
         if (request == VPN_REQUEST && result == RESULT_OK) startSelectedServer();
         if (request == QR_REQUEST) handleQrResult(result, data);
+        if (request == VPN_SHORTCUT_REQUEST && result == RESULT_OK) VpnControl.connect(this);
     }
 
     private void startSelectedServer() {
@@ -1419,6 +1463,7 @@ public final class MainActivity extends Activity {
                 if (result == null) {
                     selectedId = target.id;
                     preferences.edit().putString("selected_id", target.id).apply();
+                    rememberSelectedName();
                     uiMessage = "Сервер переключён";
                     ShadowVpnService.addLog("Сервер переключён без разрыва VPN");
                     notifySelectedServer(target.id);
@@ -1650,6 +1695,7 @@ public final class MainActivity extends Activity {
                         }
                         selectedId = id;
                         preferences.edit().putString("selected_id", id).apply();
+                        rememberSelectedName();
                         uiMessage = "";
                         notifySelectedServer(id);
                         pushSnapshot();

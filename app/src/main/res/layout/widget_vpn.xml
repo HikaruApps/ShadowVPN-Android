@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="horizontal" android:gravity="center_vertical"
+    android:padding="12dp" android:background="@drawable/widget_background">
+    <ImageView android:layout_width="28dp" android:layout_height="28dp"
+        android:src="@drawable/ic_stat_shadowvpn" android:contentDescription="@null" />
+    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+        android:layout_weight="1" android:layout_marginStart="12dp" android:orientation="vertical">
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:gravity="center_vertical">
+            <!-- RemoteViews allow only whitelisted views: ImageView, not a bare View. -->
+            <ImageView android:id="@+id/widget_dot" android:layout_width="7dp" android:layout_height="7dp"
+                android:layout_marginEnd="6dp" android:background="@drawable/widget_dot_off"
+                android:contentDescription="@null" />
+            <TextView android:id="@+id/widget_status" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Не подключено"
+                android:textColor="#F5F5F5" android:textSize="14sp" android:textStyle="bold"
+                android:maxLines="1" android:ellipsize="end" />
+        </LinearLayout>
+        <TextView android:id="@+id/widget_server" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:text="Сервер не выбран"
+            android:textColor="#A1A1A1" android:textSize="12sp"
+            android:maxLines="1" android:ellipsize="end" />
+    </LinearLayout>
+    <TextView android:id="@+id/widget_toggle" android:layout_width="wrap_content"
+        android:layout_height="36dp" android:gravity="center"
+        android:paddingStart="16dp" android:paddingEnd="16dp"
+        android:background="@drawable/widget_button" android:text="Подключить"
+        android:textColor="#0A0A0A" android:textSize="13sp" android:textStyle="bold" />
+</LinearLayout>

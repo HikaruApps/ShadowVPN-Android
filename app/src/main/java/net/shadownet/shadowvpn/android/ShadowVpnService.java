@@ -67,6 +67,7 @@ public final class ShadowVpnService extends VpnService {
         // always-on VPN, which must connect with the saved settings.
         createForegroundNotification();
         status = "Подключение…";
+        VpnControl.refreshSurfaces(this);
         executor.execute(this::connect);
         return START_NOT_STICKY;
     }
@@ -120,15 +121,18 @@ public final class ShadowVpnService extends VpnService {
             updateNotification(proxyOnly ? "Прокси 127.0.0.1:"
                     + CoreConfig.port(preferences, "proxy_socks_port", 10808) : "VPN подключён");
             watchNetwork();
+            VpnControl.refreshSurfaces(this);
         } catch (Exception error) {
             status = "Ошибка: " + (error.getMessage() == null
                     ? "не удалось подключиться" : error.getMessage());
             addLog(status);
             if (killSwitch && tunnel != null) {
                 holdBlocked();
+                VpnControl.refreshSurfaces(this);
                 return;
             }
             closeTunnel(false);
+            VpnControl.refreshSurfaces(this);
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
         }
@@ -380,6 +384,7 @@ public final class ShadowVpnService extends VpnService {
         connected = false;
         if (updateStatus) status = "Отключено";
         if (updateStatus) addLog("VPN отключён");
+        if (updateStatus) VpnControl.refreshSurfaces(this);
     }
 
     static synchronized void addLog(String value) {

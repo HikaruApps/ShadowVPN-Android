@@ -1866,6 +1866,8 @@
     // The selection changed: mark the card without rebuilding the list.
     selectedServer(id) { applySelectedServer(id); },
     offerSubscription(offer) { offerSubscription(offer); },
+    // Launcher shortcut "Сменить сервер".
+    openServers() { closePanel(); openServers(); },
     diagnosticsStep(step) { diagnosticsStep(step); },
     installedApps(payload) { if (splitAppsReceiver) splitAppsReceiver(payload); },
     appIcon(packageName, source) {

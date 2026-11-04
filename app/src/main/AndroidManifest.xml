@@ -33,7 +33,24 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="shadowvpn" android:host="import" />
             </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
+        <!-- Quick Settings tile: connect / disconnect from the notification shade. -->
+        <service android:name=".ShadowTileService" android:exported="true"
+            android:label="ShadowVPN" android:icon="@drawable/ic_stat_shadowvpn"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
+        </service>
+        <!-- Home screen widget. -->
+        <receiver android:name=".VpnWidget" android:exported="true" android:label="ShadowVPN">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info" />
+        </receiver>
         <!-- QR scanner of zxing-android-embedded; portrait like the rest of the app. -->
         <activity android:name="com.journeyapps.barcodescanner.CaptureActivity"
             android:screenOrientation="portrait" tools:replace="android:screenOrientation" />
