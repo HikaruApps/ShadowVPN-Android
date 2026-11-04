@@ -206,6 +206,8 @@ button,label,select,input,textarea{touch-action:manipulation}
 .server-list{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior:contain;padding:0 var(--gutter) var(--gutter)}
 .server-card{width:100%;min-height:60px;display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid transparent;border-radius:var(--radius);text-align:left;content-visibility:auto;contain-intrinsic-size:auto 62px;flex:0 0 auto;transition:background-color var(--tap-ms) var(--ease-soft),border-color var(--tap-ms) var(--ease-soft)}
 .server-card + .server-card{margin-top:2px}
+.server-card{position:relative}
+.flag-ring{position:absolute;border:2px solid rgba(255,255,255,.7);border-radius:50%;opacity:0;pointer-events:none}
 .server-card:active{background:var(--surface)}
 .server-card.selected{border-color:var(--border-strong);background:var(--surface)}
 /* The cards are placed with "order"; the pager sentinel must stay last. */

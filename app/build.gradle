@@ -13,8 +13,8 @@ android {
         applicationId = 'net.shadownet.shadowvpn.android'
         minSdk = 29
         targetSdk = 35
-        versionCode = 26
-        versionName = '0.22.1' + (buildSha ? '-' + buildSha.take(7) : '')
+        versionCode = 27
+        versionName = '0.23.0' + (buildSha ? '-' + buildSha.take(7) : '')
     }
     if (signingKeystore) {
         signingConfigs {

@@ -414,6 +414,8 @@
     if (card) {
       updateServerCard(card, server);
       popLatency(cardParts.get(card)?.latency);
+      // A fresh answer, not one restored from the last run.
+      if (!item.cached) popFlag(card);
     }
     if (snapshot.selectedId === item.id) {
       const ping = latencyText(server);
@@ -451,6 +453,27 @@
       if (fresh && ping.cls !== "pending") popLatency(value);
     }
     pill.className = `ping-pill ${ping.cls}`;
+  }
+
+  // The flag springs in with a ring spreading from it when the server's
+  // latency arrives (Hiddify's flag arrival): scale .4→1 with an overshoot,
+  // the ring 1→1.7 fading out. Web Animations only, no reflow.
+  function popFlag(card) {
+    const flagNode = cardParts.get(card)?.flag;
+    if (!flagNode || noMotion() || typeof flagNode.animate !== "function") return;
+    flagNode.animate([{ transform: "scale(.4)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }],
+      { duration: 500, easing: "cubic-bezier(.34,1.56,.64,1)" });
+    let ring = card.querySelector(".flag-ring");
+    if (!ring) {
+      ring = el("i", "flag-ring");
+      card.append(ring);
+    }
+    ring.style.left = `${flagNode.offsetLeft}px`;
+    ring.style.top = `${flagNode.offsetTop}px`;
+    ring.style.width = `${flagNode.offsetWidth}px`;
+    ring.style.height = `${flagNode.offsetHeight}px`;
+    ring.animate([{ transform: "scale(1)", opacity: .7 }, { transform: "scale(1.7)", opacity: 0 }],
+      { duration: 700, easing: "ease-out", fill: "forwards" });
   }
 
   /** A new check starts: every host waits for its own answer again. */
