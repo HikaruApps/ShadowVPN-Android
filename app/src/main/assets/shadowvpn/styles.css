@@ -19,8 +19,22 @@
   --radius:14px;
   --radius-lg:22px;
   --gutter:16px;
-  --ease:cubic-bezier(.2,.8,.2,1);
-  --sheet-ms:320ms;
+  /* Кривые движения. Появление: быстрый старт, мягкая остановка. Исчезновение:
+     мягкий старт, быстрый уход. Пружина — только для маленьких элементов.
+     Слайд — для больших поверхностей: мягкий разгон без отскока, чтобы лист
+     не «прыгал» на весь экран. */
+  --ease-out:cubic-bezier(.22,1,.36,1);
+  --ease-in:cubic-bezier(.4,0,1,1);
+  --ease-spring:cubic-bezier(.22,1.12,.36,1);
+  --ease-slide:cubic-bezier(.28,.86,.26,1);
+  --ease-soft:cubic-bezier(.4,0,.2,1);
+  --ease:var(--ease-out);
+  --sheet-open-ms:320ms;
+  --sheet-close-ms:220ms;
+  --scrim-open-ms:280ms;
+  --scrim-close-ms:180ms;
+  --micro-ms:90ms;
+  --tap-ms:130ms;
 }
 
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -37,20 +51,22 @@ img{display:block}
 /* ---------- Shell ---------- */
 .app{position:relative;height:100%;height:100dvh;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:56px minmax(0,1fr) auto;padding:0 var(--gutter) var(--gutter);overflow:hidden;isolation:isolate}
 
-.icon-button{width:40px;height:40px;flex:0 0 40px;display:grid;place-items:center;border:1px solid var(--border);border-radius:50%;color:var(--text-2);transition:background 150ms ease,color 150ms ease}
-.icon-button:active{background:var(--surface-2);color:var(--text)}
+.icon-button{width:40px;height:40px;flex:0 0 40px;display:grid;place-items:center;border:1px solid var(--border);border-radius:50%;color:var(--text-2);transition:transform var(--micro-ms) var(--ease-out),background-color 100ms linear,color 100ms linear}
+.icon-button:active{transform:scale(.94);background:var(--surface-2);color:var(--text)}
 .icon-button[aria-expanded="true"]{background:var(--surface-2);border-color:var(--border-strong);color:var(--text)}
 
 .topbar{position:relative;z-index:20;display:grid;grid-template-columns:40px minmax(0,1fr) 40px;align-items:center;gap:12px}
 .brand{display:flex;align-items:center;justify-content:center;gap:8px;min-width:0;font-size:16px;font-weight:600;letter-spacing:-.01em}
 .brand img{width:22px;height:22px}
 
-.popover{position:absolute;z-index:50;min-width:200px;padding:6px;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--surface-2);box-shadow:0 12px 32px rgba(0,0,0,.5);transform-origin:top right;animation:pop 160ms var(--ease)}
-.popover button{width:100%;min-height:44px;display:flex;align-items:center;gap:12px;padding:0 12px;border-radius:var(--radius-sm);font-size:14px;text-align:left}
+/* Всплывающие меню: появление и исчезновение отдельными кривыми. */
+.popover{position:absolute;z-index:50;min-width:200px;padding:6px;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--surface-2);box-shadow:0 12px 32px rgba(0,0,0,.5);transform-origin:top right;opacity:0;transform:translateY(-6px) scale(.98);pointer-events:none;transition:opacity 140ms var(--ease-in),transform 140ms var(--ease-in);will-change:transform,opacity;backface-visibility:hidden;-webkit-backface-visibility:hidden}
+.popover.open{opacity:1;transform:none;pointer-events:auto;transition-duration:180ms;transition-timing-function:var(--ease-out)}
+.popover.closing{pointer-events:none}
+.popover button{width:100%;min-height:44px;display:flex;align-items:center;gap:12px;padding:0 12px;border-radius:var(--radius-sm);font-size:14px;text-align:left;transition:background-color 110ms var(--ease-out)}
 .popover button:active{background:var(--surface-3)}
 .popover svg{color:var(--text-2)}
 .app-menu{top:52px;right:0}
-@keyframes pop{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}
 
 /* ---------- Home ---------- */
 .stage{min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:16px;padding:8px 0 16px}
@@ -59,22 +75,30 @@ img{display:block}
 .quota-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;font-size:12px}
 .quota-row span{min-width:0;overflow:hidden;color:var(--text-2);text-overflow:ellipsis;white-space:nowrap}
 .quota-row b{flex:0 0 auto;font-weight:500;font-variant-numeric:tabular-nums}
-.quota-track{height:4px;margin-top:10px;overflow:hidden;border-radius:2px;background:var(--surface-3)}
-.quota-track i{display:block;width:0;height:100%;border-radius:inherit;background:var(--text);transition:width 400ms var(--ease)}
-.quota-track i.unlimited{width:100%!important;background:var(--text-3)}
+.quota-track{position:relative;height:4px;margin-top:10px;overflow:hidden;border-radius:2px;background:var(--surface-3)}
+.quota-track i{position:absolute;inset:0;display:block;width:100%;height:100%;border-radius:inherit;background:var(--text);transform:scaleX(0);transform-origin:left center;transition:transform 320ms var(--ease-out);will-change:transform;backface-visibility:hidden;-webkit-backface-visibility:hidden}
+.quota-track i.unlimited{transform:scaleX(1)!important;background:var(--text-3)}
 .quota-track i.warning{background:var(--warning)}
 .quota small{display:block;margin-top:8px;color:var(--text-3);font-size:11px}
 
 .stage-center{grid-row:2;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px}
-.power{width:clamp(136px,40vw,168px);aspect-ratio:1;display:grid;place-items:center;border:1px solid var(--border-strong);border-radius:50%;background:var(--surface);color:var(--text-3);transition:transform 160ms var(--ease),border-color 200ms ease,color 200ms ease,box-shadow 200ms ease}
+.power{--ring-color:transparent;position:relative;width:clamp(136px,40vw,168px);aspect-ratio:1;display:grid;place-items:center;border:1px solid var(--border-strong);border-radius:50%;background:var(--surface);color:var(--text-3);transition:transform 110ms var(--ease-out),border-color 160ms var(--ease-out),color 160ms var(--ease-out)}
+/* Кольцо живёт на отдельном слое: его появление идёт через opacity и
+   transform, без перерисовки самого круга. */
+.power::before{content:"";position:absolute;inset:0;border-radius:50%;box-shadow:0 0 0 8px var(--ring-color);opacity:0;transform:scale(.9);pointer-events:none;transition:opacity 170ms var(--ease-out),transform 220ms var(--ease-spring);will-change:transform,opacity;backface-visibility:hidden;-webkit-backface-visibility:hidden}
 .power svg{width:44%;height:44%;stroke-width:1.6}
+/* Traffic glow (connected): a soft halo behind the button whose strength is
+   --glow (0..1) from the live speed. Only opacity and transform change. */
+.power::after{content:"";position:absolute;inset:-22%;z-index:-1;border-radius:50%;background:radial-gradient(circle,rgba(63,185,80,.32) 0%,rgba(63,185,80,.12) 45%,transparent 70%);opacity:calc(var(--glow,0) * .9);transform:scale(calc(.82 + var(--glow,0) * .26));transition:opacity 800ms var(--ease-out),transform 800ms var(--ease-out);pointer-events:none;will-change:opacity,transform}
 .power:active:not(:disabled){transform:scale(.97)}
 .power:disabled{opacity:1}
-.app[data-state="connected"] .power{border-color:var(--success);color:var(--text);box-shadow:0 0 0 8px var(--success-soft)}
+.app[data-state="connected"] .power{--ring-color:var(--success-soft);border-color:var(--success);color:var(--text)}
+.app[data-state="connected"] .power::before{opacity:1;transform:scale(1)}
 .app[data-state="connecting"] .power{color:var(--text-2)}
-.app[data-state="connecting"] .power svg{animation:pulse 1.2s ease-in-out infinite}
+.app[data-state="connecting"] .power svg{animation:pulse 1.5s ease-in-out infinite}
 .app[data-state="error"] .power{border-color:var(--danger)}
-@keyframes pulse{50%{opacity:.35}}
+/* Мягкое «дыхание»: без резкого мигания и без лишней перерисовки. */
+@keyframes pulse{50%{opacity:.5}}
 
 .status{max-width:320px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center}
 .status h1{font-size:20px;font-weight:600;letter-spacing:-.02em}
@@ -83,7 +107,8 @@ img{display:block}
 .status .server-flag{width:18px;height:18px;flex:0 0 18px}
 .app[data-state="error"] .status h1{color:var(--danger)}
 .app[data-state="error"] .status p{display:block}
-.app[data-state="blocked"] .power{border-color:var(--danger);color:var(--text);box-shadow:0 0 0 8px var(--danger-soft)}
+.app[data-state="blocked"] .power{--ring-color:var(--danger-soft);border-color:var(--danger);color:var(--text)}
+.app[data-state="blocked"] .power::before{opacity:1;transform:scale(1)}
 .app[data-state="blocked"] .status h1{color:var(--danger)}
 .app[data-state="blocked"] .status p{display:block}
 
@@ -100,15 +125,17 @@ img{display:block}
 .ip-pill .dot{width:6px;height:6px;flex:0 0 6px;border-radius:50%;background:var(--text-3)}
 .ip-pill .divider{width:1px;height:14px;background:var(--border-strong)}
 .app[data-state="connected"] .ip-pill .dot{background:var(--success)}
-.app[data-state="connecting"] .ip-pill .dot{animation:pulse 1s ease-in-out infinite}
+.app[data-state="connecting"] .ip-pill .dot{animation:pulse 1.3s ease-in-out infinite}
 
 .dock{position:relative;z-index:10;min-width:0}
 .stage,.topbar{min-width:0}
 /* Closing overlays must not swallow the next tap while they fade out. */
-.scrim.closing,.panel-overlay.closing{pointer-events:none}
-button,label,select,input{touch-action:manipulation}
-.server-picker{width:100%;min-height:68px;display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);text-align:left;touch-action:none;transition:background 150ms ease}
-.server-picker:active{background:var(--surface-2)}
+.scrim.closing,.panel-overlay.closing,.panel-overlay:not(.open),.panel.closing{pointer-events:none}
+button,label,select,input,textarea{touch-action:manipulation}
+.server-list{touch-action:pan-y}
+.chips{touch-action:pan-x}
+.server-picker{width:100%;min-height:68px;display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);text-align:left;touch-action:none;transition:transform var(--micro-ms) var(--ease-out),background-color 100ms linear}
+.server-picker:active{transform:scale(.985);background:var(--surface-2)}
 .chevron{flex:0 0 20px;color:var(--text-3)}
 
 .server-flag{width:36px;height:36px;flex:0 0 36px;display:grid;place-items:center;overflow:hidden;border-radius:50%;background:var(--surface-3);color:var(--text-2)}
@@ -122,60 +149,116 @@ button,label,select,input{touch-action:manipulation}
 .latency.good{color:var(--success)}
 .latency.medium{color:var(--warning)}
 .latency.bad{color:var(--danger)}
-.latency.pending{animation:pulse 1s ease-in-out infinite}
+/* Во время проверки анимируется только кнопка пинга: десятки отдельных
+   пульсаций на карточках съедали бы кадры на слабых устройствах. */
+.latency.pending{color:var(--text-3)}
+/* Restored from the last run, not measured yet in this one. */
+.latency.cached{opacity:.5}
 
 /* ---------- Sheets ---------- */
-.scrim{position:fixed;z-index:60;inset:0;background:rgba(0,0,0,.6);animation:fade var(--sheet-ms) ease;transition:opacity var(--sheet-ms) ease}
-@keyframes fade{from{opacity:0}}
+/* Затемнение и лист анимируются раздельно: иначе opacity родителя тянул за
+   собой и сам лист, и он выцветал вместо того, чтобы просто выехать. */
+.scrim{position:fixed;z-index:60;inset:0;background:rgba(0,0,0,.6);opacity:0;pointer-events:none;transition:opacity var(--scrim-close-ms) var(--ease-in);will-change:opacity}
+.scrim.open{opacity:1;pointer-events:auto;transition-duration:var(--scrim-open-ms);transition-timing-function:var(--ease-slide)}
 
 .sheet{position:fixed;z-index:70;left:0;right:0;bottom:0;display:flex;flex-direction:column;border:1px solid var(--border);border-bottom:0;border-radius:var(--radius-lg) var(--radius-lg) 0 0;background:var(--bg);overflow:hidden}
 .grabber{flex:0 0 auto;width:36px;height:4px;margin:8px auto 0;border-radius:2px;background:var(--border-strong)}
 
-.server-sheet{height:88%;transform:translateY(105%);transition:transform var(--sheet-ms) var(--ease)}
-.server-sheet.open{transform:translateY(0)}
-.server-sheet.dragging{transform:translateY(var(--drag-y,0));transition:none}
+.server-sheet{height:88%;transform:translate3d(0,105%,0);transition:transform var(--sheet-close-ms) var(--ease-in);will-change:transform;backface-visibility:hidden;-webkit-backface-visibility:hidden}
+.server-sheet.open{transform:translate3d(0,0,0);transition-duration:var(--sheet-open-ms);transition-timing-function:var(--ease-slide)}
+.server-sheet.dragging{transform:translate3d(0,var(--drag-y,0),0);transition:none}
+/* Шапка и фильтры проявляются вместе с листом, чуть позже его движения:
+   так содержимое не щёлкает на экране в момент открытия. */
+.sheet-header{opacity:0;transform:translate3d(0,6px,0);transition:opacity 200ms var(--ease-out) 60ms,transform 280ms var(--ease-out) 60ms}
+.chips{opacity:0;transform:translate3d(0,6px,0);transition:opacity 200ms var(--ease-out) 60ms,transform 280ms var(--ease-out) 60ms}
+.server-sheet.open .sheet-header,.server-sheet.open .chips{opacity:1;transform:translate3d(0,0,0)}
 
 .sheet-header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px var(--gutter);touch-action:none}
 .sheet-title{min-width:0}
 .sheet-title h2{font-size:18px;font-weight:600;letter-spacing:-.01em}
 .sheet-title p{margin-top:2px;color:var(--text-3);font-size:12px}
 .sheet-actions{display:flex;gap:8px}
-#pingButton.running svg{animation:pulse 800ms ease-in-out infinite}
+#pingButton.running svg{animation:pulse 900ms ease-in-out infinite}
 .sort-menu{top:72px;right:var(--gutter)}
 .sort-menu button{justify-content:space-between}
 .sort-menu svg{color:var(--text);opacity:0}
 .sort-menu button[aria-checked="true"] svg{opacity:1}
 
-.chips{flex:0 0 auto;display:flex;gap:6px;padding:0 var(--gutter) 12px;overflow-x:auto;scrollbar-width:none}
+.chips{flex:0 0 auto;position:relative;display:flex;gap:6px;padding:0 var(--gutter) 12px;overflow-x:auto;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
-.chips button{flex:0 0 auto;height:32px;padding:0 12px;border:1px solid var(--border);border-radius:16px;color:var(--text-2);font-size:13px}
-.chips button.active{border-color:var(--text);background:var(--text);color:var(--bg);font-weight:500}
+.chips button{position:relative;z-index:1;flex:0 0 auto;height:32px;padding:0 12px;border:1px solid var(--border);border-radius:16px;color:var(--text-2);font-size:13px;transition:background-color 160ms var(--ease-out),border-color 160ms var(--ease-out),color 120ms 200ms var(--ease-out)}
+/* Белая «таблетка» под активной категорией переезжает на неё. */
+.chip-indicator{position:absolute;z-index:0;top:0;left:0;height:32px;border-radius:16px;background:var(--text);opacity:0;pointer-events:none;transition:transform 300ms var(--ease-spring),width 300ms var(--ease-out),opacity 140ms var(--ease-out)}
+.chips button.active{border-color:transparent;background:none;color:var(--bg);font-weight:500}
 
-.server-list{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:0 var(--gutter) var(--gutter)}
-.server-card{width:100%;min-height:60px;display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid transparent;border-radius:var(--radius);text-align:left;content-visibility:auto;contain-intrinsic-size:auto 62px}
+/* The list is a flex column so the cards can be reordered with the CSS
+   "order" property: sorting by latency then costs no DOM rebuild. */
+.server-list{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior:contain;padding:0 var(--gutter) var(--gutter)}
+.server-card{width:100%;min-height:60px;display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid transparent;border-radius:var(--radius);text-align:left;content-visibility:auto;contain-intrinsic-size:auto 62px;flex:0 0 auto;transition:background-color var(--tap-ms) var(--ease-soft),border-color var(--tap-ms) var(--ease-soft)}
 .server-card + .server-card{margin-top:2px}
 .server-card:active{background:var(--surface)}
 .server-card.selected{border-color:var(--border-strong);background:var(--surface)}
-.list-sentinel{height:1px}
+/* The cards are placed with "order"; the pager sentinel must stay last. */
+.list-sentinel{height:1px;order:2147483647}
 .empty-list{padding:48px 16px;color:var(--text-3);font-size:13px;text-align:center}
 
-.panel-overlay{position:fixed;z-index:90;inset:0;background:rgba(0,0,0,.6);animation:fade var(--sheet-ms) ease;transition:opacity var(--sheet-ms) ease}
-.panel{height:92%;animation:sheet-in var(--sheet-ms) var(--ease);transition:transform var(--sheet-ms) var(--ease)}
-.panel.dragging{animation:none;transform:translateY(var(--panel-drag-y,0));transition:none}
-.panel.closing{animation:none;transform:translateY(105%)}
-@keyframes sheet-in{from{transform:translateY(100%)}}
-
+/* Затемнение панели живёт в псевдоэлементе, чтобы opacity родителя не
+   делал прозрачной саму панель. */
+.panel-overlay{position:fixed;z-index:90;inset:0;background:transparent;--scrim-opacity:0}
+.panel-overlay::before{content:"";position:absolute;inset:0;background:rgba(0,0,0,.6);opacity:var(--scrim-opacity);transition:opacity var(--scrim-close-ms) var(--ease-in);will-change:opacity}
+.panel-overlay.open{--scrim-opacity:1}
+.panel-overlay.open::before{transition-duration:var(--scrim-open-ms);transition-timing-function:var(--ease-slide)}
+.panel{height:92%;transform:translate3d(0,105%,0);transition:transform var(--sheet-close-ms) var(--ease-in);will-change:transform;backface-visibility:hidden;-webkit-backface-visibility:hidden}
+.panel.open{transform:translate3d(0,0,0);transition-duration:var(--sheet-open-ms);transition-timing-function:var(--ease-slide)}
+.panel.dragging{transform:translate3d(0,var(--panel-drag-y,0),0);transition:none}
+.panel.closing{pointer-events:none}
+/* Заголовок панели догоняет её ход, чтобы панель не выглядела пустой. */
+.panel-header{opacity:0;transform:translate3d(0,6px,0);transition:opacity 200ms var(--ease-out) 60ms,transform 280ms var(--ease-out) 60ms}
+.panel.open .panel-header{opacity:1;transform:translate3d(0,0,0)}
 .panel-header{flex:0 0 auto;display:grid;grid-template-columns:40px minmax(0,1fr) 40px;align-items:center;gap:12px;padding:12px var(--gutter);touch-action:none}
 .panel-header h2{grid-column:2;overflow:hidden;font-size:17px;font-weight:600;letter-spacing:-.01em;text-align:center;text-overflow:ellipsis;white-space:nowrap}
 #panelBack{grid-column:1}
 #closePanel{grid-column:3}
-.panel-body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:4px var(--gutter) 24px}
+.panel-body{flex:1;min-height:0;position:relative;overflow-y:auto;overscroll-behavior:contain;padding:4px var(--gutter) 24px;scrollbar-color:var(--surface-3) transparent;scrollbar-width:thin}
+
+/* ---------- Переходы между страницами ---------- */
+/* Переход идёт в два шага: старая страница уходит (10px в сторону и
+   растворение), и только потом приезжает новая — страницы не накладываются
+   друг на друга. Вперёд — влево, назад — вправо. Название панели едет
+   вместе со своей страницей. */
+.page{position:relative}
+.page.page-in{animation:pageIn 190ms var(--ease-out)}
+.page.page-in.back{animation-name:pageInBack}
+.page.page-out{animation:pageOut 140ms var(--ease-in) forwards}
+.page.page-out.back{animation-name:pageOutBack}
+@keyframes pageIn{from{opacity:0;transform:translateX(10px)}}
+/* Short settings pages build up in a quick stagger (60 ms per block, as in
+   Hiddify); long lists start at once from the sixth block on. */
+.page.page-in > *{animation:rise 220ms var(--ease-out) both}
+.page.page-in > :nth-child(2){animation-delay:60ms}
+.page.page-in > :nth-child(3){animation-delay:120ms}
+.page.page-in > :nth-child(4){animation-delay:180ms}
+.page.page-in > :nth-child(5){animation-delay:240ms}
+.page.page-in > :nth-child(n+6){animation-delay:300ms}
+@keyframes rise{from{opacity:0;transform:translate3d(0,8px,0)}}
+@keyframes pageOut{to{opacity:0;transform:translateX(-10px)}}
+@keyframes pageInBack{from{opacity:0;transform:translateX(-10px)}}
+@keyframes pageOutBack{to{opacity:0;transform:translateX(10px)}}
+/* Заголовок панели уходит и приходит вместе со страницей. */
+#panelTitle.title-in{animation:titleIn 190ms var(--ease-out)}
+#panelTitle.title-in.back{animation-name:titleInBack}
+#panelTitle.title-out{animation:titleOut 140ms var(--ease-in) forwards}
+#panelTitle.title-out.back{animation-name:titleOutBack}
+@keyframes titleIn{from{opacity:0;transform:translateX(10px)}}
+@keyframes titleOut{to{opacity:0;transform:translateX(-10px)}}
+@keyframes titleInBack{from{opacity:0;transform:translateX(-10px)}}
+@keyframes titleOutBack{to{opacity:0;transform:translateX(10px)}}
 
 /* ---------- Settings primitives ---------- */
 .group-label{margin:20px 4px 8px;color:var(--text-3);font-size:12px;font-weight:500}
 .group-label:first-child{margin-top:8px}
 .list{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);overflow:hidden}
-.row{width:100%;min-height:56px;display:flex;align-items:center;gap:12px;padding:12px 14px;text-align:left}
+.row{width:100%;min-height:56px;display:flex;align-items:center;gap:12px;padding:12px 14px;text-align:left;transition:background-color var(--tap-ms) var(--ease-soft)}
 .row + .row{border-top:1px solid var(--border)}
 .row.stack{flex-direction:column;align-items:stretch}
 button.row:active,label.row:active{background:var(--surface-2)}
@@ -191,9 +274,12 @@ button.row:active,label.row:active{background:var(--surface-2)}
 .mono{font-family:ui-monospace,"Cascadia Code",Menlo,monospace;font-size:12px;letter-spacing:0}
 
 select.control{flex:0 0 auto;width:44%;max-width:180px;height:36px;padding:0 32px 0 12px;-webkit-appearance:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1a1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;background-size:16px 16px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);outline:none;background-color:var(--surface-2);font-size:13px;text-overflow:ellipsis}
-.switch{position:relative;width:40px;height:24px;flex:0 0 40px;border-radius:12px;background:var(--surface-3);box-shadow:inset 0 0 0 1px var(--border-strong);transition:background 150ms ease}
-.switch::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--text-2);transition:transform 180ms var(--ease),background 150ms ease}
-.switch[aria-checked="true"]{background:var(--text);box-shadow:none}
+/* Переключатель: заливка и ползунок на отдельных слоях, движение
+   пружинное, без перерисовки каждый кадр. */
+.switch{position:relative;width:40px;height:24px;flex:0 0 40px;border-radius:12px;background:var(--surface-3);box-shadow:inset 0 0 0 1px var(--border-strong)}
+.switch::before{content:"";position:absolute;inset:0;z-index:0;border-radius:inherit;background:var(--text);opacity:0;transform:scale(.82);transition:opacity 140ms var(--ease-out),transform 220ms var(--ease-spring);will-change:transform,opacity}
+.switch::after{content:"";position:absolute;z-index:1;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--text-2);transition:transform 220ms var(--ease-spring),background-color 120ms var(--ease-out);will-change:transform}
+.switch[aria-checked="true"]::before{opacity:1;transform:scale(1)}
 .switch[aria-checked="true"]::after{transform:translateX(16px);background:var(--bg)}
 input[type="checkbox"],input[type="radio"]{width:18px;height:18px;flex:0 0 18px;accent-color:var(--text)}
 
@@ -207,8 +293,8 @@ textarea.field[rows="2"]{height:68px}
 .welcome textarea.field{height:88px}
 .field-error{display:block;min-height:16px;margin-top:6px;color:var(--danger);font-size:12px}
 
-.button{width:100%;height:44px;display:flex;align-items:center;justify-content:center;gap:8px;border-radius:var(--radius-sm);font-size:14px;font-weight:500;transition:opacity 150ms ease}
-.button:active{opacity:.8}
+.button{width:100%;height:44px;display:flex;align-items:center;justify-content:center;gap:8px;border-radius:var(--radius-sm);font-size:14px;font-weight:500;transition:opacity 80ms var(--ease-out),transform 80ms var(--ease-out)}
+.button:active{opacity:.78;transform:scale(.985)}
 .button.primary{background:var(--text);color:var(--bg)}
 .button.secondary{border:1px solid var(--border-strong);background:var(--surface-2)}
 .button.danger{color:var(--danger)}
@@ -220,7 +306,7 @@ textarea.field[rows="2"]{height:68px}
 .app-icon img{width:100%;height:100%;object-fit:cover}
 .lazy-row{content-visibility:auto;contain-intrinsic-size:auto 61px}
 .loading{display:flex;align-items:center;justify-content:center;gap:10px;min-height:96px;color:var(--text-3);font-size:13px}
-.loading i{width:16px;height:16px;border:2px solid var(--border-strong);border-top-color:var(--text-2);border-radius:50%;animation:spin 800ms linear infinite}
+.loading i{width:16px;height:16px;border:2px solid var(--border-strong);border-top-color:var(--text-2);border-radius:50%;animation:spin 800ms linear infinite;will-change:transform}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 .log-box{min-height:320px;padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text-2);font:12px/1.55 ui-monospace,"Cascadia Code",Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;-webkit-user-select:text;user-select:text}
@@ -238,8 +324,8 @@ textarea.field[rows="2"]{height:68px}
 .welcome p{margin:8px 0 32px;color:var(--text-2);font-size:14px;text-align:center}
 .welcome .button{margin-top:8px}
 
-.toast{position:fixed;z-index:150;left:50%;bottom:104px;max-width:calc(100% - 32px);padding:10px 14px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface-2);font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.4);transform:translateX(-50%);animation:toast 200ms var(--ease)}
-@keyframes toast{from{opacity:0;transform:translate(-50%,6px)}}
+.toast{position:fixed;z-index:150;left:50%;bottom:104px;max-width:calc(100% - 32px);padding:10px 14px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface-2);font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.4);transform:translate(-50%,10px) scale(.97);opacity:0;pointer-events:none;transition:opacity 160ms var(--ease-in),transform 160ms var(--ease-in);will-change:transform,opacity}
+.toast.visible{opacity:1;transform:translate(-50%,0) scale(1);transition-duration:220ms;transition-timing-function:var(--ease-out)}
 
 /* ---------- Adaptation ---------- */
 @media (max-height:640px){
@@ -258,8 +344,15 @@ textarea.field[rows="2"]{height:68px}
   .sheet{max-width:560px;margin:0 auto}
 }
 
-/* Low-end devices and reduced motion: no shadows, no decorative motion. */
+/* Low-end devices: no shadows and no paint-heavy motion. Transform and
+   opacity animations stay: they are the cheap ones and make the UI feel
+   responsive instead of frozen. */
 .lite *,.lite *::before,.lite *::after{box-shadow:none!important;animation:none!important}
 .lite .loading i{animation:spin 800ms linear infinite!important}
-.lite{--sheet-ms:200ms}
+.lite .power::after{display:none}
+.lite .power svg,.lite .ip-pill .dot,.lite #pingButton.running svg{animation:pulse 1.5s ease-in-out infinite!important}
+.lite .icon-button,.lite .server-picker,.lite .button,.lite .row,.lite .server-card,.lite .switch::before,.lite .switch::after,.lite .quota-track i,.lite .sheet-header,.lite .chips,.lite .panel-header,.lite .chips button,.lite .chip-indicator,.lite .popover button{transition:none!important}
+.lite{--sheet-open-ms:200ms;--sheet-close-ms:160ms;--scrim-open-ms:180ms;--scrim-close-ms:140ms}
+/* Still pictures (the browser preview) show the final state right away. */
+.no-anim *,.no-anim *::before,.no-anim *::after{transition:none!important;animation:none!important}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}

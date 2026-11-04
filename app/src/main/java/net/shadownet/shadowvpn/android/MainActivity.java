@@ -14,6 +14,8 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.drawable.Drawable;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.TrafficStats;
 import android.net.Uri;
 import android.net.VpnService;
@@ -54,8 +56,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public final class MainActivity extends Activity {
     private static final int VPN_REQUEST = 100;
@@ -68,11 +72,15 @@ public final class MainActivity extends Activity {
     // Server switches and live reloads run apart from imports and pings,
     // which can take tens of seconds.
     private final ExecutorService switchWorker = Executors.newSingleThreadExecutor();
+    // A ping can take minutes, so it gets its own thread and never delays an
+    // import or the public IP lookup.
+    private final ExecutorService pingRunner = Executors.newSingleThreadExecutor();
     private String switchingTo = "";
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final List<ServerItem> servers = new ArrayList<>();
     private final List<SubscriptionInfo> subscriptionInfo = new ArrayList<>();
     private final Map<String, PingData> pingResults = new HashMap<>();
+    private final List<PingDelta> pendingPingDeltas = new ArrayList<>();
     private final Map<String, String> appIconCache = new ConcurrentHashMap<>();
     private final Set<String> pendingAppIcons = ConcurrentHashMap.newKeySet();
     private volatile String installedAppsCache = "";
@@ -81,12 +89,19 @@ public final class MainActivity extends Activity {
     private WebView webView;
     private boolean webReady;
     private String lastRuntimeSnapshot = "";
+    private String serversJsonCache = "";
+    private String settingsJsonCache = "";
+    private String appVersionCache = "";
+    private boolean appVersionLoaded;
     private boolean importRunning;
     private boolean launchUpdateDone;
     /** Auto-connect on launch runs once per process, not on every return to the app. */
     private static boolean autoConnectChecked;
     private boolean pingRunning;
+    private boolean pingFlushScheduled;
     private boolean wasConnected;
+    private boolean serviceWarningShown;
+    private int serviceWarningGeneration;
     private String selectedId = "";
     private String doh = "https://1.1.1.1/dns-query";
     private String deviceHwid = "Недоступно";
@@ -103,6 +118,18 @@ public final class MainActivity extends Activity {
     private String uploadSpeed = "0 Б/с";
     private String downloadTotal = "0 Б";
     private String uploadTotal = "0 Б";
+    // Raw rates for the connect button's glow; the strings above are for text.
+    private long downloadRate;
+    private long uploadRate;
+    // Latencies restored from the last run: shown dimmed until checked again.
+    private boolean pingResultsCached;
+    // Re-check after the phone moved to another network (as Hiddify does):
+    // latencies from Wi-Fi say nothing about mobile data.
+    private ConnectivityManager.NetworkCallback networkWatcher;
+    private Network watchedNetwork;
+    private final Runnable networkRecheck = () -> {
+        if (!pingRunning && !pingResults.isEmpty()) runPings();
+    };
 
     private final Runnable statusUpdater = new Runnable() {
         @Override public void run() {
@@ -155,6 +182,8 @@ public final class MainActivity extends Activity {
                 if (!UI_URL.equals(url)) return;
                 webReady = true;
                 pushSnapshot();
+                // A reloaded page lost the latencies; they are not part of the snapshot.
+                requeuePingResults();
                 loadCachedServers();
             }
         });
@@ -183,15 +212,50 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        // Battery access and local addresses can change while the app is away.
+        settingsJsonCache = "";
         ui.removeCallbacks(statusUpdater);
         ui.post(statusUpdater);
         ui.post(this::pushSnapshot);
         ui.postDelayed(this::maybeAutoUpdate, 1200);
+        watchNetwork();
     }
 
     @Override protected void onPause() {
         ui.removeCallbacks(statusUpdater);
+        unwatchNetwork();
         super.onPause();
+    }
+
+    private void watchNetwork() {
+        ConnectivityManager manager = getSystemService(ConnectivityManager.class);
+        if (manager == null || networkWatcher != null) return;
+        networkWatcher = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) {
+                ui.post(() -> {
+                    Network previous = watchedNetwork;
+                    watchedNetwork = network;
+                    // The first callback reports the current network.
+                    if (previous == null || previous.equals(network)) return;
+                    ui.removeCallbacks(networkRecheck);
+                    ui.postDelayed(networkRecheck, 2000);
+                });
+            }
+        };
+        try {
+            manager.registerDefaultNetworkCallback(networkWatcher);
+        } catch (RuntimeException error) {
+            networkWatcher = null;
+        }
+    }
+
+    private void unwatchNetwork() {
+        ui.removeCallbacks(networkRecheck);
+        if (networkWatcher == null) return;
+        try {
+            getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networkWatcher);
+        } catch (RuntimeException ignored) { }
+        networkWatcher = null;
     }
 
     @Override protected void onDestroy() {
@@ -200,6 +264,7 @@ public final class MainActivity extends Activity {
         worker.shutdownNow();
         appWorker.shutdownNow();
         switchWorker.shutdownNow();
+        pingRunner.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("ShadowVpnAndroid");
             webView.destroy();
@@ -243,6 +308,7 @@ public final class MainActivity extends Activity {
                     try { applyServers(parseServers(new JSONObject(result))); }
                     catch (Exception ignored) { }
                 }
+                restorePingCache();
                 boolean refresh = hasSources() && (servers.isEmpty()
                         || !launchUpdateDone && preferences.getBoolean("update_on_open", false));
                 launchUpdateDone = true;
@@ -297,10 +363,14 @@ public final class MainActivity extends Activity {
     private void applyServers(List<ServerItem> parsed) {
         servers.clear();
         servers.addAll(parsed);
+        serversJsonCache = "";
+        boolean selectionChanged = false;
         if (findSelected() == null && !servers.isEmpty()) {
             selectedId = servers.get(0).id;
             preferences.edit().putString("selected_id", selectedId).apply();
+            selectionChanged = true;
         }
+        if (selectionChanged) notifySelectedServer(selectedId);
         pushSnapshot();
     }
 
@@ -333,10 +403,12 @@ public final class MainActivity extends Activity {
                 ui.post(() -> {
                     subscriptionInfo.clear();
                     subscriptionInfo.addAll(parsedSubscriptionInfo);
+                    serversJsonCache = "";
                     preferences.edit().putString("subscription_info",
                             subscriptionInfoJson().toString()).apply();
                     if (!importedDoh.isEmpty()) {
                         doh = importedDoh;
+                        settingsJsonCache = "";
                         preferences.edit().putString("doh", doh).apply();
                     }
                     importRunning = false;
@@ -423,6 +495,7 @@ public final class MainActivity extends Activity {
             subscriptionInfo.addAll(parseSubscriptionInfo(
                     new JSONArray(preferences.getString("subscription_info", "[]"))));
         } catch (Exception ignored) { }
+        serversJsonCache = "";
     }
 
     private JSONArray subscriptionInfoJson() {
@@ -445,33 +518,274 @@ public final class MainActivity extends Activity {
     }
 
     private void runPings() {
-        if (pingRunning || servers.isEmpty()) return;
+        if (pingRunning) return;
         pingRunning = true;
         pingResults.clear();
+        pingResultsCached = false;
+        pendingPingDeltas.clear();
+        if (webReady && webView != null) {
+            webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.pingStarted()", null);
+        }
         pushSnapshot();
         String method = CoreConfig.pingMethod(preferences);
-        worker.execute(() -> {
-            try {
-                JSONArray results = new JSONArray(Bridge.pingProfiles(method));
-                Map<String, PingData> loaded = new HashMap<>();
-                for (int i = 0; i < results.length(); i++) {
-                    JSONObject item = results.getJSONObject(i);
-                    loaded.put(item.getString("id"), new PingData(
-                            item.optLong("latencyMs", 0), item.optBoolean("available", false)));
-                }
-                ui.post(() -> {
-                    pingResults.putAll(loaded);
-                    pingRunning = false;
-                    pushSnapshot();
-                });
-            } catch (Exception ignored) {
-                ui.post(() -> {
-                    pingRunning = false;
-                    uiMessage = "Не удалось проверить задержку";
-                    pushSnapshot();
-                });
+        pingRunner.execute(() -> runPingChecks(method));
+    }
+
+    /** Runs the checks in a bounded pool and posts each completed host immediately. */
+    private void runPingChecks(String method) {
+        ExecutorService pool = null;
+        try {
+            JSONObject plan = new JSONObject(Bridge.pingPlan());
+            List<PingHost> hosts = parsePingHosts(plan.optJSONArray("servers"));
+            List<PingGroup> groups = parsePingGroups(plan.optJSONArray("groups"));
+            String autoId = plan.optString("autoId", "");
+            String autoNoRUId = plan.optString("autoNoRUId", "");
+            if (hosts.isEmpty()) {
+                ui.post(this::finishPings);
+                return;
             }
+            // Real checks wait on the network, not the CPU; the core still
+            // serializes the instance creation itself.
+            int concurrency = "real".equals(method) ? 6 : 16;
+            pool = Executors.newFixedThreadPool(concurrency);
+            ExecutorCompletionService<PingResult> completion =
+                    new ExecutorCompletionService<>(pool);
+            for (PingHost host : hosts) {
+                completion.submit(() -> pingOne(host, method));
+            }
+            Map<String, PingData> known = new HashMap<>();
+            Map<String, PingData> aggregateState = new HashMap<>();
+            for (int i = 0; i < hosts.size(); i++) {
+                Future<PingResult> future = completion.take();
+                PingResult result = future.get();
+                known.put(result.id, result.data);
+                List<PingDelta> deltas = new ArrayList<>();
+                deltas.add(new PingDelta(result.id, result.data.latency, result.data.available));
+                for (PingGroup group : groups) {
+                    addAggregateDelta(aggregateState, deltas, group.id,
+                            aggregateForGroup(group, known));
+                }
+                addAggregateDelta(aggregateState, deltas, autoId,
+                        aggregateForHosts(hosts, known, false));
+                addAggregateDelta(aggregateState, deltas, autoNoRUId,
+                        aggregateForHosts(hosts, known, true));
+                final List<PingDelta> update = deltas;
+                ui.post(() -> applyPingUpdate(update));
+            }
+            pool.shutdown();
+            ui.post(this::finishPings);
+        } catch (Exception error) {
+            if (pool != null) pool.shutdownNow();
+            ui.post(this::failPings);
+        }
+    }
+
+    private PingResult pingOne(PingHost host, String method) {
+        PingData data;
+        try {
+            JSONObject result = new JSONObject(Bridge.pingProfile(host.id, method));
+            data = new PingData(result.optLong("latencyMs", 0),
+                    result.optBoolean("available", false));
+        } catch (Exception error) {
+            // A missing or broken host is an unavailable result, not a failed run.
+            data = new PingData(0, false);
+        }
+        return new PingResult(host.id, data);
+    }
+
+    private List<PingHost> parsePingHosts(JSONArray array) {
+        List<PingHost> result = new ArrayList<>();
+        if (array == null) return result;
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item == null) continue;
+            String id = item.optString("id", "");
+            if (!id.isEmpty()) {
+                result.add(new PingHost(id, item.optString("protocol", ""),
+                        item.optBoolean("russian", false)));
+            }
+        }
+        return result;
+    }
+
+    private List<PingGroup> parsePingGroups(JSONArray array) {
+        List<PingGroup> result = new ArrayList<>();
+        if (array == null) return result;
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item == null) continue;
+            String id = item.optString("id", "");
+            if (id.isEmpty()) continue;
+            List<String> members = new ArrayList<>();
+            JSONArray values = item.optJSONArray("members");
+            if (values != null) {
+                for (int j = 0; j < values.length(); j++) {
+                    String member = values.optString(j, "");
+                    if (!member.isEmpty()) members.add(member);
+                }
+            }
+            result.add(new PingGroup(id, members));
+        }
+        return result;
+    }
+
+    private PingData aggregateForGroup(PingGroup group, Map<String, PingData> known) {
+        long fastest = Long.MAX_VALUE;
+        boolean available = false;
+        for (String member : group.members) {
+            PingData data = known.get(member);
+            if (data != null && data.available) {
+                available = true;
+                fastest = Math.min(fastest, data.latency);
+            }
+        }
+        return available ? new PingData(fastest, true) : new PingData(0, false);
+    }
+
+    private PingData aggregateForHosts(List<PingHost> hosts, Map<String, PingData> known,
+                                       boolean withoutRussian) {
+        long fastest = Long.MAX_VALUE;
+        boolean available = false;
+        for (PingHost host : hosts) {
+            if ("naive".equalsIgnoreCase(host.protocol)) continue;
+            if (withoutRussian && host.russian) continue;
+            PingData data = known.get(host.id);
+            if (data != null && data.available) {
+                available = true;
+                fastest = Math.min(fastest, data.latency);
+            }
+        }
+        return available ? new PingData(fastest, true) : new PingData(0, false);
+    }
+
+    private void addAggregateDelta(Map<String, PingData> state, List<PingDelta> deltas,
+                                   String id, PingData value) {
+        if (id.isEmpty()) return;
+        PingData previous = state.get(id);
+        if (previous != null && previous.latency == value.latency
+                && previous.available == value.available) return;
+        state.put(id, value);
+        deltas.add(new PingDelta(id, value.latency, value.available));
+    }
+
+    private void applyPingUpdate(List<PingDelta> deltas) {
+        for (PingDelta delta : deltas) {
+            pingResults.put(delta.id, new PingData(delta.latency, delta.available));
+            pendingPingDeltas.add(delta);
+        }
+        schedulePingFlush();
+    }
+
+    /** Coalesces fast results so the WebView receives at most one call per 80 ms. */
+    private void schedulePingFlush() {
+        if (pingFlushScheduled || pendingPingDeltas.isEmpty()) return;
+        pingFlushScheduled = true;
+        ui.postDelayed(this::flushPingResults, 80);
+    }
+
+    private void flushPingResults() {
+        pingFlushScheduled = false;
+        if (pendingPingDeltas.isEmpty()) return;
+        if (!webReady || webView == null) return;
+        StringBuilder script = new StringBuilder();
+        for (PingDelta delta : pendingPingDeltas) {
+            script.append("window.ShadowVPN&&window.ShadowVPN.pingResult({")
+                    .append("\"id\":").append(JSONObject.quote(delta.id))
+                    .append(",\"latency\":").append(delta.latency)
+                    .append(",\"available\":").append(delta.available)
+                    .append(",\"cached\":").append(delta.cached)
+                    .append("});");
+        }
+        pendingPingDeltas.clear();
+        webView.evaluateJavascript(script.toString(), null);
+    }
+
+    private void requeuePingResults() {
+        for (Map.Entry<String, PingData> entry : pingResults.entrySet()) {
+            pendingPingDeltas.add(new PingDelta(entry.getKey(),
+                    entry.getValue().latency, entry.getValue().available, pingResultsCached));
+        }
+        schedulePingFlush();
+    }
+
+    private void finishPings() {
+        pingRunning = false;
+        savePingCache();
+        pushSnapshot();
+    }
+
+    private static final long PING_CACHE_MAX_AGE = 24L * 60 * 60 * 1000;
+
+    /** Keeps the last latencies so the list is not blank on the next start. */
+    private void savePingCache() {
+        try {
+            JSONObject results = new JSONObject();
+            for (Map.Entry<String, PingData> entry : pingResults.entrySet()) {
+                results.put(entry.getKey(), new JSONArray()
+                        .put(entry.getValue().latency).put(entry.getValue().available));
+            }
+            JSONObject cache = new JSONObject()
+                    .put("at", System.currentTimeMillis())
+                    .put("method", CoreConfig.pingMethod(preferences))
+                    .put("results", results);
+            preferences.edit().putString("ping_cache", cache.toString()).apply();
+        } catch (Exception ignored) { }
+    }
+
+    private void restorePingCache() {
+        if (pingRunning || !pingResults.isEmpty()) return;
+        try {
+            JSONObject cache = new JSONObject(preferences.getString("ping_cache", "{}"));
+            long age = System.currentTimeMillis() - cache.optLong("at", 0);
+            // Old results, or ones from the other method, would only mislead.
+            if (age < 0 || age > PING_CACHE_MAX_AGE
+                    || !CoreConfig.pingMethod(preferences).equals(cache.optString("method"))) return;
+            JSONObject results = cache.getJSONObject("results");
+            for (java.util.Iterator<String> keys = results.keys(); keys.hasNext(); ) {
+                String id = keys.next();
+                JSONArray value = results.getJSONArray(id);
+                pingResults.put(id, new PingData(value.optLong(0), value.optBoolean(1)));
+            }
+            pingResultsCached = !pingResults.isEmpty();
+            requeuePingResults();
+        } catch (Exception ignored) { }
+    }
+
+    /**
+     * Checks one server on request, the way Hiddify does for a tap: a quick
+     * failure gets a second attempt from the 3rd second on, so a transient
+     * drop does not mark a working server dead. Either way it ends within
+     * about 10 seconds plus the attempt itself.
+     */
+    private void pingServer(String id) {
+        if (pingRunning || id == null || id.isEmpty()) return;
+        String method = CoreConfig.pingMethod(preferences);
+        pingRunner.execute(() -> {
+            long started = SystemClock.elapsedRealtime();
+            PingResult result = pingOne(new PingHost(id, "", false), method);
+            long elapsed = SystemClock.elapsedRealtime() - started;
+            if (!result.data.available && elapsed < 5000) {
+                try {
+                    Thread.sleep(Math.max(0, 3000 - elapsed));
+                } catch (InterruptedException interrupted) {
+                    return;
+                }
+                result = pingOne(new PingHost(id, "", false), method);
+            }
+            PingResult answer = result;
+            ui.post(() -> {
+                pingResults.put(answer.id, answer.data);
+                List<PingDelta> update = new ArrayList<>();
+                update.add(new PingDelta(answer.id, answer.data.latency, answer.data.available));
+                applyPingUpdate(update);
+            });
         });
+    }
+
+    private void failPings() {
+        pingRunning = false;
+        uiMessage = "Не удалось проверить задержку";
+        pushSnapshot();
     }
 
     /** Connects once at launch; with an empty cache it waits for the first import. */
@@ -564,8 +878,11 @@ public final class MainActivity extends Activity {
             fetchPublicIp(true);
         }
         if (!connected) {
+            serviceWarningShown = false;
+            serviceWarningGeneration++;
             connectedAt = 0;
             downloadSpeed = uploadSpeed = "0 Б/с";
+            downloadRate = uploadRate = 0;
             downloadTotal = uploadTotal = "0 Б";
             if (wasConnected) {
                 publicIp = "";
@@ -574,8 +891,26 @@ public final class MainActivity extends Activity {
             }
         } else {
             updateTraffic();
+            showServiceWarning();
         }
         wasConnected = connected;
+    }
+
+    /** Shows a non-fatal core warning once without changing the connected state. */
+    private void showServiceWarning() {
+        if (serviceWarningShown) return;
+        String warning = ShadowVpnService.warning;
+        if (warning == null || warning.trim().isEmpty()) return;
+        serviceWarningShown = true;
+        final int generation = serviceWarningGeneration;
+        uiMessage = warning;
+        pushSnapshot();
+        ui.postDelayed(() -> {
+            if (generation == serviceWarningGeneration && warning.equals(uiMessage)) {
+                uiMessage = "";
+                pushSnapshot();
+            }
+        }, 100);
     }
 
     private void fetchPublicIp(boolean throughVpn) {
@@ -626,8 +961,10 @@ public final class MainActivity extends Activity {
         long rx = safeTraffic(TrafficStats.getUidRxBytes(getApplicationInfo().uid));
         long tx = safeTraffic(TrafficStats.getUidTxBytes(getApplicationInfo().uid));
         long elapsed = Math.max(1, now - trafficLastAt);
-        downloadSpeed = formatBytes(Math.max(0, rx - trafficLastRx) * 1000 / elapsed) + "/с";
-        uploadSpeed = formatBytes(Math.max(0, tx - trafficLastTx) * 1000 / elapsed) + "/с";
+        downloadRate = Math.max(0, rx - trafficLastRx) * 1000 / elapsed;
+        uploadRate = Math.max(0, tx - trafficLastTx) * 1000 / elapsed;
+        downloadSpeed = formatBytes(downloadRate) + "/с";
+        uploadSpeed = formatBytes(uploadRate) + "/с";
         downloadTotal = formatBytes(Math.max(0, rx - trafficStartedRx));
         uploadTotal = formatBytes(Math.max(0, tx - trafficStartedTx));
         trafficLastRx = rx;
@@ -638,8 +975,9 @@ public final class MainActivity extends Activity {
     private void pushSnapshot() {
         if (!webReady || webView == null) return;
         lastRuntimeSnapshot = "";
-        JSONObject snapshot = buildSnapshot();
+        String snapshot = buildSnapshot();
         webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.render(" + snapshot + ")", null);
+        schedulePingFlush();
     }
 
     private void pushRuntimeSnapshot() {
@@ -651,23 +989,63 @@ public final class MainActivity extends Activity {
         webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.render(" + snapshot + ")", null);
     }
 
-    private JSONObject buildSnapshot() {
-        JSONObject root = runtimeSnapshot();
+    /** Builds the snapshot from cached JSON fragments instead of one large object. */
+    private String buildSnapshot() {
+        String runtime = runtimeSnapshot().toString();
+        StringBuilder root = new StringBuilder(runtime.length() + 512);
+        // The runtime part is a JSON object; its closing brace is replaced by
+        // the fields below. An empty runtime object would leave a stray comma.
+        boolean empty = runtime.length() <= 2;
+        root.append(runtime, 0, Math.max(0, runtime.length() - 1));
+        if (!empty) root.append(',');
+        root.append("\"needsSubscription\":").append(!hasSources());
+        root.append(",\"importRunning\":").append(importRunning);
+        root.append(",\"pingRunning\":").append(pingRunning);
+        root.append(",\"servers\":").append(serverListJson());
+        ServerItem selected = findSelected();
         try {
-            root.put("needsSubscription", !hasSources());
-            root.put("importRunning", importRunning);
-            root.put("pingRunning", pingRunning);
-            JSONArray list = new JSONArray();
-            for (ServerItem server : servers) list.put(serverJson(server));
-            root.put("servers", list);
-            ServerItem selected = findSelected();
-            root.put("selected", selected == null ? JSONObject.NULL : serverJson(selected));
-            root.put("subscriptions", subscriptionSlotsJson());
-            root.put("settings", settingsJson());
-            root.put("appVersion", getPackageManager()
-                    .getPackageInfo(getPackageName(), 0).versionName);
-        } catch (Exception ignored) { }
-        return root;
+            root.append(",\"selected\":")
+                    .append(selected == null ? "null" : serverJson(selected).toString());
+        } catch (Exception ignored) {
+            root.append(",\"selected\":null");
+        }
+        root.append(",\"selectedId\":").append(JSONObject.quote(selectedId));
+        root.append(",\"subscriptions\":").append(subscriptionSlotsJson().toString());
+        root.append(",\"settings\":").append(cachedSettingsJson());
+        root.append(",\"appVersion\":").append(JSONObject.quote(appVersion()));
+        root.append("}");
+        return root.toString();
+    }
+
+    private String serverListJson() {
+        if (!serversJsonCache.isEmpty()) return serversJsonCache;
+        JSONArray list = new JSONArray();
+        for (ServerItem server : servers) {
+            try { list.put(serverJson(server)); } catch (Exception ignored) { }
+        }
+        serversJsonCache = list.toString();
+        return serversJsonCache;
+    }
+
+    private String cachedSettingsJson() {
+        if (settingsJsonCache.isEmpty()) {
+            try { settingsJsonCache = settingsJson().toString(); }
+            catch (Exception ignored) { settingsJsonCache = "{}"; }
+        }
+        return settingsJsonCache;
+    }
+
+    private String appVersion() {
+        if (!appVersionLoaded) {
+            appVersionLoaded = true;
+            try {
+                String version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+                appVersionCache = version == null ? "" : version;
+            } catch (Exception ignored) {
+                appVersionCache = "";
+            }
+        }
+        return appVersionCache;
     }
 
     private JSONObject runtimeSnapshot() {
@@ -692,6 +1070,8 @@ public final class MainActivity extends Activity {
             traffic.put("downloadTotal", downloadTotal);
             traffic.put("uploadSpeed", uploadSpeed);
             traffic.put("uploadTotal", uploadTotal);
+            traffic.put("downloadRate", downloadRate);
+            traffic.put("uploadRate", uploadRate);
             root.put("traffic", traffic);
         } catch (Exception ignored) { }
         return root;
@@ -708,7 +1088,6 @@ public final class MainActivity extends Activity {
         item.put("format", server.format);
         item.put("members", server.members);
         item.put("auto", server.auto);
-        item.put("selected", server.id.equals(selectedId));
         item.put("source", server.sourceIndex == MANUAL_SOURCE ? "manual"
                 : server.sourceIndex < 0 ? "" : subscriptionSlotName(server.sourceIndex));
         SubscriptionInfo source = server.sourceIndex == MANUAL_SOURCE
@@ -722,11 +1101,6 @@ public final class MainActivity extends Activity {
             subscription.put("total", source.total);
             subscription.put("expire", source.expire);
             item.put("subscription", subscription);
-        }
-        PingData ping = pingResults.get(server.id);
-        if (ping != null) {
-            item.put("latency", ping.latency);
-            item.put("available", ping.available);
         }
         return item;
     }
@@ -828,6 +1202,7 @@ public final class MainActivity extends Activity {
                     preferences.edit().putString("selected_id", target.id).apply();
                     uiMessage = "Сервер переключён";
                     ShadowVpnService.addLog("Сервер переключён без разрыва VPN");
+                    notifySelectedServer(target.id);
                     refreshVpnIp();
                 } else {
                     uiMessage = result;
@@ -943,11 +1318,13 @@ public final class MainActivity extends Activity {
             CoreConfig.configure(this, preferences);
         } catch (Exception error) {
             restorePreferences(previous);
+            settingsJsonCache = "";
             ShadowVpnService.addLog("Настройки не сохранены: " + cleanError(error));
             uiMessage = "Не сохранено · " + cleanError(error);
             pushSnapshot();
             return;
         }
+        settingsJsonCache = "";
         boolean connected = ShadowVpnService.connected;
         // Proxy only and VPN are different kinds of connection; switching needs a reconnect.
         boolean reconnect = connected && (!tunBefore.equals(signature(TUN_KEYS))
@@ -996,6 +1373,7 @@ public final class MainActivity extends Activity {
         SharedPreferences.Editor editor = preferences.edit();
         CoreConfig.newProxyCredentials(editor);
         editor.commit();
+        settingsJsonCache = "";
         try {
             CoreConfig.configure(this, preferences);
             if (ShadowVpnService.connected) reloadCore();
@@ -1007,6 +1385,7 @@ public final class MainActivity extends Activity {
     }
 
     private void restorePreferences(Map<String, ?> values) {
+        settingsJsonCache = "";
         SharedPreferences.Editor editor = preferences.edit().clear();
         for (Map.Entry<String, ?> entry : values.entrySet()) {
             Object value = entry.getValue();
@@ -1032,6 +1411,12 @@ public final class MainActivity extends Activity {
         return manager != null && manager.isIgnoringBatteryOptimizations(getPackageName());
     }
 
+    private void notifySelectedServer(String id) {
+        if (!webReady || webView == null) return;
+        webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.selectedServer("
+                + JSONObject.quote(id) + ")", null);
+    }
+
     private final class AndroidBridge {
         @JavascriptInterface public void ready() { ui.post(MainActivity.this::pushSnapshot); }
         @JavascriptInterface public void toggleVpn() { ui.post(MainActivity.this::toggleVpn); }
@@ -1047,6 +1432,7 @@ public final class MainActivity extends Activity {
                         selectedId = id;
                         preferences.edit().putString("selected_id", id).apply();
                         uiMessage = "";
+                        notifySelectedServer(id);
                         pushSnapshot();
                         return;
                     }
@@ -1059,6 +1445,10 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void pingServers() { ui.post(MainActivity.this::runPings); }
+        // Qualified, or the call would resolve to this bridge method itself.
+        @JavascriptInterface public void pingServer(String id) {
+            ui.post(() -> MainActivity.this.pingServer(id));
+        }
 
         @JavascriptInterface public void saveSubscriptions(String json) {
             ui.post(() -> {
@@ -1083,10 +1473,12 @@ public final class MainActivity extends Activity {
                     if (!hasSources()) {
                         servers.clear();
                         subscriptionInfo.clear();
+                        serversJsonCache = "";
                         selectedId = "";
                         preferences.edit().remove("selected_id")
                                 .remove("subscription_info").apply();
                         uiMessage = "";
+                        notifySelectedServer("");
                         pushSnapshot();
                     } else {
                         importSubscriptions(true);
@@ -1282,6 +1674,7 @@ public final class MainActivity extends Activity {
         JSONArray urls = new JSONArray();
         if (!wifi.isEmpty()) urls.put(wifi);
         if (!lte.isEmpty() && !lte.equals(wifi)) urls.put(lte);
+        serversJsonCache = "";
         preferences.edit()
                 .putString("subscription_wifi", wifi)
                 .putString("subscription_lte", lte)
@@ -1402,12 +1795,63 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static final class PingHost {
+        final String id;
+        final String protocol;
+        final boolean russian;
+
+        PingHost(String id, String protocol, boolean russian) {
+            this.id = id;
+            this.protocol = protocol;
+            this.russian = russian;
+        }
+    }
+
+    private static final class PingGroup {
+        final String id;
+        final List<String> members;
+
+        PingGroup(String id, List<String> members) {
+            this.id = id;
+            this.members = members;
+        }
+    }
+
+    private static final class PingResult {
+        final String id;
+        final PingData data;
+
+        PingResult(String id, PingData data) {
+            this.id = id;
+            this.data = data;
+        }
+    }
+
+    private static final class PingDelta {
+        final String id;
+        final long latency;
+        final boolean available;
+        /** Restored from the last run rather than measured now. */
+        final boolean cached;
+
+        PingDelta(String id, long latency, boolean available) {
+            this(id, latency, available, false);
+        }
+
+        PingDelta(String id, long latency, boolean available, boolean cached) {
+            this.id = id;
+            this.latency = latency;
+            this.available = available;
+            this.cached = cached;
+        }
+    }
+
     private static final class PingData {
         final long latency;
         final boolean available;
 
         PingData(long latency, boolean available) {
-            this.latency = latency;
+            this.latency = available ? Math.max(0, latency) : 0;
             this.available = available;
         }
     }

@@ -50,6 +50,9 @@ var mobile struct {
 	profileID      string
 	switching      bool
 	watchdogCancel context.CancelFunc
+	// warning tells the app that something was left out, e.g. a routing rule
+	// whose list could not be downloaded.
+	warning string
 }
 
 type mobileOptions struct {
@@ -81,6 +84,22 @@ type mobileOptions struct {
 
 func (options mobileOptions) geoURLs() (string, string) {
 	return firstNonEmpty(options.GeoIPURL, defaultGeoIPURL), firstNonEmpty(options.GeoSiteURL, defaultGeoSiteURL)
+}
+
+// setRuntimeWarning records what had to be left out, so the app can tell the
+// user instead of silently changing the routing.
+func setRuntimeWarning(message string) {
+	mobile.Lock()
+	mobile.warning = message
+	mobile.Unlock()
+}
+
+// LastWarning returns the warning of the last prepared session, or an empty
+// string when everything worked as asked.
+func LastWarning() string {
+	mobile.Lock()
+	defer mobile.Unlock()
+	return mobile.warning
 }
 
 // SetDeviceSeed must be called with Settings.Secure.ANDROID_ID before importing.
@@ -408,6 +427,7 @@ func Prepare(profileID string) error {
 	}
 	closeNaive(mobile.naive)
 	mobile.naive, mobile.prepared = nil, nil
+	mobile.warning = ""
 	inputs := currentSessionInputs()
 	mobile.Unlock()
 

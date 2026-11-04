@@ -3,11 +3,19 @@ Set-StrictMode -Version Latest
 
 $repoRoot = $PSScriptRoot
 $mobileVersion = 'v0.0.0-20260908204917-8b95e45f8d3e'
-$ndkVersion = '28.0.13004108'
+$ndkVersion = if ($env:NDK_VERSION) { $env:NDK_VERSION } else { '28.0.13004108' }
 if (-not $env:ANDROID_HOME) { throw 'ANDROID_HOME is not set' }
-$ndkDirectory = Join-Path $env:ANDROID_HOME "ndk\$ndkVersion"
+$ndkRoot = Join-Path $env:ANDROID_HOME 'ndk'
+$ndkDirectory = Join-Path $ndkRoot $ndkVersion
 if (-not (Test-Path -LiteralPath $ndkDirectory -PathType Container)) {
-    throw "Android NDK $ndkVersion was not found under ANDROID_HOME"
+    # Fall back to any installed NDK so the bridge still builds on machines that
+    # only have a different revision.
+    $installed = @(Get-ChildItem -LiteralPath $ndkRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object -Property Name)
+    if ($installed.Count -eq 0) { throw "No Android NDK found under $ndkRoot" }
+    $ndkVersion = $installed[-1].Name
+    $ndkDirectory = $installed[-1].FullName
+    Write-Host "Using Android NDK $ndkVersion"
 }
 $env:ANDROID_NDK_HOME = $ndkDirectory
 $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())

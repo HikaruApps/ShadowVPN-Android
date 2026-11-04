@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id);
   const hasNativeBridge = !!window.ShadowVpnAndroid;
   const native = window.ShadowVpnAndroid || {
-    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {},
+    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {},
     saveSubscriptions() {}, saveSettings() {}, getLogs() { return ""; }, copyText() {}, openVpnSettings() {},
     getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}, resetProxyCredentials() {}
   };
@@ -27,24 +27,53 @@
   let category = "all";
   let sortMode = "original";
   let serversSignature = "";
+  // Set when something in the cards really changed. The status timer pushes a
+  // snapshot twice a second; it must not touch the cards every time.
+  let cardsDirty = true;
   let categoriesSignature = "";
   let serverPager = null;
   let dockFlagKey = null;
   let statusKey = "";
   let toastTimer = 0;
+  let toastHideTimer = 0;
   let lastMessage = "";
   let sheetOpen = false;
   let panelBackAction = null;
   let panelCloseTimer = 0;
+  // The page the panel shows right now: its wrapper is animated out when
+  // another page opens.
+  let currentPage = null;
+  // Direction of the page movement: 1 is forward, -1 is back.
+  let pageDirection = 1;
+  // The second half of a page change: the new page arrives after the old
+  // one has left.
+  let pageSwapTimer = 0;
+  // Cancels a deferred panel build when the user navigated away meanwhile.
+  let panelBuildToken = 0;
   let panelPager = null;
   let splitAppsReceiver = null;
   let appIconObserver = null;
   let refreshBattery = null;
   let refreshProxy = null;
-  // A drag that ends over a button must not also press it.
-  let suppressClickUntil = 0;
+  // Collected settings changes; flushed when the user leaves the page or
+  // switches the settings tab.
+  let pendingSettings = [];
+  // Server models and their cards, kept between renders: a new latency only
+  // changes a few nodes, so the list is never rebuilt from scratch.
+  const serverModels = new Map();
+  const serverCards = new Map();
+  const cardParts = new WeakMap();
+  // Visual order of the cards. CSS "order" moves them without rebuilding
+  // the list, so sorting by latency stays cheap while a ping runs.
+  const serverOrder = new Map();
+  // A drag that ends over a button must not also press it. Only the click
+  // that follows the drag is suppressed, not every click for a while.
+  let suppressNextClick = false;
+  document.addEventListener("pointerdown", () => { suppressNextClick = false; }, true);
   document.addEventListener("click", event => {
-    if (performance.now() < suppressClickUntil) { event.preventDefault(); event.stopPropagation(); }
+    if (!suppressNextClick) return;
+    suppressNextClick = false;
+    event.preventDefault(); event.stopPropagation();
   }, true);
 
   const ICONS = {
@@ -81,6 +110,30 @@
   function setText(id, value) {
     const node = $(id);
     if (node.textContent !== value) node.textContent = value;
+  }
+
+  // Runs the callback after the given number of frames. Two frames are enough
+  // for the browser to paint the current state, so an animation that starts
+  // afterwards really animates instead of jumping to its end state.
+  function afterFrames(count, callback) {
+    const step = () => {
+      count -= 1;
+      if (count <= 0) { callback(); return; }
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  // Waits until the browser has drawn the frame that was just started, so an
+  // animation is already on screen before the heavy work begins.
+  function afterFirstPaint(callback) {
+    afterFrames(2, callback);
+  }
+
+  // Runs the callback when the browser has nothing better to do.
+  function scheduleIdle(callback) {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(callback, { timeout: 300 });
+    else setTimeout(callback, 60);
   }
 
   function plural(count, forms) {
@@ -130,10 +183,12 @@
   }
 
   function latencyText(server) {
-    if (snapshot.pingRunning && server.latency == null) return { text: "•••", cls: "pending" };
+    if (server.checking || (snapshot.pingRunning && server.latency == null)) return { text: "•••", cls: "pending" };
     if (server.latency == null) return { text: "", cls: "" };
-    if (!server.available) return { text: "—", cls: "bad" };
-    return { text: `${server.latency} мс`, cls: server.latency < 180 ? "good" : server.latency < 450 ? "medium" : "bad" };
+    // Restored from the last run: shown, but dimmed until checked again.
+    const cached = server.cached ? " cached" : "";
+    if (!server.available) return { text: "—", cls: `bad${cached}` };
+    return { text: `${server.latency} мс`, cls: (server.latency < 180 ? "good" : server.latency < 450 ? "medium" : "bad") + cached };
   }
 
   function quotaBytes(value) {
@@ -225,27 +280,206 @@
     });
     if (reset) setCategory("all");
     $("categories").hidden = $("categories").querySelectorAll("button:not([hidden])").length < 2;
+    moveChipIndicator();
   }
 
   function setCategory(name) {
     category = name;
     $("categories").querySelectorAll("button[data-category]").forEach(item =>
       item.classList.toggle("active", item.dataset.category === name));
+    moveChipIndicator();
+  }
+
+  // «Таблетка» под активной категорией переезжает на неё.
+  function moveChipIndicator(strip = $("categories")) {
+    const indicator = strip.querySelector(".chip-indicator");
+    if (!indicator) return;
+    const active = strip.querySelector("button.active");
+    if (!active || active.hidden || strip.hidden) { indicator.style.opacity = "0"; return; }
+    indicator.style.opacity = "1";
+    indicator.style.width = `${active.offsetWidth}px`;
+    indicator.style.transform = `translateX(${active.offsetLeft}px)`;
+  }
+
+  // Cards are reused between renders. A new latency or a new selection only
+  // touches a few nodes, so the list survives a ping without being rebuilt.
+  function flagKey(server) {
+    return `${server.auto ? 1 : 0}|${server.members || 0}|${server.countryCode || ""}`;
   }
 
   function serverCard(server) {
-    const card = el("button", `server-card${server.selected ? " selected" : ""}`);
+    const cached = serverCards.get(server.id);
+    if (cached) { updateServerCard(cached, server); return cached; }
+    const card = el("button", "server-card");
+    card.type = "button";
+    card.dataset.id = server.id;
+    card.style.order = String(serverOrder.get(server.id) ?? 0);
     const copy = el("span", "server-copy");
+    const name = el("b", null, server.name);
     const details = el("small");
+    const flagSlot = flag(server);
+    const latency = el("span", "latency");
     fillMeta(details, server);
-    copy.append(el("b", null, server.name), details);
-    const info = latencyText(server);
-    card.append(flag(server), copy, el("span", `latency ${info.cls}`, info.text));
-    card.addEventListener("click", () => {
-      native.selectServer(server.id);
-      window.setTimeout(closeServers, 110);
-    });
+    copy.append(name, details);
+    card.append(flagSlot, copy, latency);
+    cardParts.set(card, { name, details, flag: flagSlot, latency, flagKey: flagKey(server) });
+    serverCards.set(server.id, card);
+    updateServerCard(card, server);
     return card;
+  }
+
+  function updateServerCard(card, server) {
+    if (!server) return;
+    const parts = cardParts.get(card);
+    if (!parts) return;
+    card.classList.toggle("selected", !!server.selected);
+    if (parts.name.textContent !== server.name) parts.name.textContent = server.name;
+    fillMeta(parts.details, server);
+    const info = latencyText(server);
+    if (parts.latency.textContent !== info.text) parts.latency.textContent = info.text;
+    parts.latency.className = `latency ${info.cls}`;
+    const key = flagKey(server);
+    if (parts.flagKey !== key) {
+      parts.flagKey = key;
+      const nextFlag = flag(server);
+      parts.flag.replaceWith(nextFlag);
+      parts.flag = nextFlag;
+    }
+  }
+
+  /** Recomputes the visual order of the cards from the current sort. */
+  function updateServerOrder() {
+    serverOrder.clear();
+    visibleServers().forEach((server, index) => serverOrder.set(server.id, index));
+  }
+
+  /** Keeps the cards in sync with the models without touching the list order. */
+  function updateMountedCards() {
+    updateServerOrder();
+    serverCards.forEach((card, id) => {
+      const server = serverModels.get(id);
+      if (!server) return;
+      updateServerCard(card, server);
+      const rank = serverOrder.get(id);
+      if (rank != null) card.style.order = String(rank);
+    });
+  }
+
+  /** Takes the server list from Android and keeps the known latencies. */
+  function ingestServers(items) {
+    const next = new Map();
+    for (const item of items || []) next.set(item.id, item);
+    for (const [id, old] of serverModels) {
+      const fresh = next.get(id);
+      if (!fresh) {
+        serverModels.delete(id);
+        serverCards.delete(id);
+        continue;
+      }
+      // The list carries no latency any more: it arrives separately, as soon
+      // as each host answers. Keep the last known value until it does.
+      if (fresh.latency == null && old.latency != null) {
+        fresh.latency = old.latency;
+        fresh.available = old.available;
+      }
+      next.set(id, fresh);
+    }
+    serverModels.clear();
+    for (const [id, item] of next) serverModels.set(id, item);
+    snapshot.servers = [...serverModels.values()];
+    cardsDirty = true;
+  }
+
+  /** Marks the chosen server; the selection arrives as a plain ID. */
+  function applySelectedServer(id) {
+    const chosen = id || "";
+    for (const [serverId, server] of serverModels) server.selected = serverId === chosen;
+    snapshot.selectedId = chosen;
+    snapshot.selected = serverModels.get(chosen) || null;
+    cardsDirty = true;
+    updateMountedCards();
+  }
+
+  /** A host answered: show its latency right away. */
+  function applyPingResult(item) {
+    if (!item || !item.id) return;
+    const server = serverModels.get(item.id);
+    if (!server) return;
+    server.latency = item.latency;
+    server.available = item.available;
+    server.cached = !!item.cached;
+    server.checking = false;
+    cardsDirty = true;
+    const card = serverCards.get(item.id);
+    if (card) {
+      updateServerCard(card, server);
+      popLatency(cardParts.get(card)?.latency);
+    }
+    if (snapshot.selectedId === item.id) {
+      const ping = latencyText(server);
+      setText("dockPing", ping.text);
+      $("dockPing").className = `latency ${ping.cls}`;
+    }
+    // Sorting by latency reorders the list; "order" moves the cards without
+    // rebuilding them.
+    if (sortMode === "latency") updateMountedCards();
+  }
+
+  // A fresh latency pops in (as in Hiddify): scale from half size with a
+  // small overshoot. Web Animations run on the compositor and need no
+  // reflow, so dozens of answers at once stay cheap.
+  function popLatency(node) {
+    if (!node || noMotion() || typeof node.animate !== "function") return;
+    node.animate(
+      [{ transform: "scale(.5)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }],
+      { duration: 450, easing: "cubic-bezier(.34,1.56,.64,1)" });
+  }
+
+  // The connect button glows with the live traffic, like Hiddify's corona:
+  // the light follows a rise quickly (about 0.8 s) and fades slowly (about
+  // 2.5 s), on a log scale so a page load and a download both show.
+  let glowLevel = 0;
+  let glowTimer = 0;
+  function trafficLevel() {
+    const rate = (Number(snapshot.traffic?.downloadRate) || 0) + (Number(snapshot.traffic?.uploadRate) || 0);
+    // 0 at idle, 1 at about 10 MB/s.
+    return Math.min(1, Math.log10(1 + rate / 1024) / 4);
+  }
+  function updateGlow(connected) {
+    const power = $("powerButton");
+    if (!connected || noMotion()) {
+      clearInterval(glowTimer); glowTimer = 0; glowLevel = 0;
+      power.style.removeProperty("--glow");
+      return;
+    }
+    const step = () => {
+      const target = trafficLevel();
+      // Rise at once (CSS smooths it); decay with a 2.5 s time constant.
+      glowLevel = target >= glowLevel ? target : target + (glowLevel - target) * Math.exp(-0.5 / 2.5);
+      const value = glowLevel < 0.01 ? "0" : glowLevel.toFixed(2);
+      if (power.style.getPropertyValue("--glow") !== value) power.style.setProperty("--glow", value);
+    };
+    step();
+    // Snapshots stop when nothing changes; the fade must not stop with them.
+    if (!glowTimer) glowTimer = setInterval(step, 500);
+  }
+
+  /** A new check starts: every host waits for its own answer again. */
+  function clearPingResults() {
+    for (const server of serverModels.values()) {
+      delete server.latency;
+      delete server.available;
+      delete server.cached;
+      delete server.checking;
+    }
+    cardsDirty = true;
+    updateMountedCards();
+    const selected = snapshot.selected;
+    if (selected) {
+      const ping = latencyText(selected);
+      setText("dockPing", ping.text);
+      $("dockPing").className = `latency ${ping.cls}`;
+    }
   }
 
   function renderServers(force = false) {
@@ -253,10 +487,19 @@
     if (!sheetOpen) { serversSignature = ""; return; }
     updateCategories();
     const visible = visibleServers();
-    const signature = JSON.stringify([category, sortMode, snapshot.pingRunning, snapshot.importRunning,
-      visible.map(item => [item.id, item.selected, item.latency, item.available])]);
-    if (!force && signature === serversSignature) return;
+    // Only the structure is part of the signature. A new latency or a new
+    // selection updates the cards in place instead of rebuilding the list.
+    const structure = visible.map(item => item.id).join("|");
+    const signature = `${category}|${sortMode}|${snapshot.pingRunning}|${snapshot.importRunning}|${structure}`;
+    if (!force && signature === serversSignature) {
+      // Nothing about the list changed: the cards do not have to be touched.
+      if (!cardsDirty) return;
+      updateMountedCards();
+      cardsDirty = false;
+      return;
+    }
     serversSignature = signature;
+    cardsDirty = false;
     const scroll = serverList.scrollTop;
     serverPager?.disconnect();
     serverList.replaceChildren();
@@ -269,7 +512,12 @@
       serverPager = null;
       return;
     }
+    // Cards that left the list are dropped, the rest are reused as they are.
+    const visibleIds = new Set(visible.map(server => server.id));
+    for (const id of [...serverCards.keys()]) if (!visibleIds.has(id)) serverCards.delete(id);
+    updateServerOrder();
     serverPager = lazyList(serverList, visible, serverCard, serverList, 40);
+    updateMountedCards();
     serverList.scrollTop = scroll;
   }
 
@@ -325,8 +573,10 @@
     setText("quotaTitle", subscription.title || "Трафик подписки");
     setText("quotaValue", unlimited ? `${quotaBytes(used)} · без лимита` : `${quotaBytes(used)} из ${quotaBytes(total)}`);
     const bar = $("quotaProgress");
-    const width = `${percent}%`;
-    if (bar.style.width !== width) bar.style.width = width;
+    // The bar grows with a transform: animating the width would relayout the
+    // page on every frame.
+    const scale = `scaleX(${percent / 100})`;
+    if (bar.style.transform !== scale) bar.style.transform = scale;
     bar.classList.toggle("unlimited", unlimited);
     bar.classList.toggle("warning", !unlimited && percent >= 85);
     const expires = Number(subscription.expire) || 0;
@@ -341,9 +591,16 @@
       ...(next || {}),
       traffic: { ...(snapshot.traffic || {}), ...((next && next.traffic) || {}) },
       settings: (next && next.settings) || snapshot.settings || {},
-      servers: (next && next.servers) || snapshot.servers || [],
       subscriptions: (next && next.subscriptions) || snapshot.subscriptions || {wifi:"",lte:""}
     };
+    // The server list arrives without latencies and without the selection:
+    // both come separately, so a new latency never rebuilds the list.
+    if (next && Array.isArray(next.servers)) ingestServers(next.servers);
+    if (next && Object.prototype.hasOwnProperty.call(next, "selectedId")) {
+      applySelectedServer(next.selectedId);
+    } else if (next && next.selected) {
+      applySelectedServer(next.selected.id);
+    }
     const state = snapshot.state || "disconnected";
     if (app.dataset.state !== state) app.dataset.state = state;
     const connected = state === "connected";
@@ -352,6 +609,7 @@
     power.disabled = connecting || !snapshot.selected || !!snapshot.switchingTo;
     power.setAttribute("aria-label", connected || state === "blocked" ? "Отключить VPN" : "Подключить VPN");
     renderStatus(connected, connecting);
+    updateGlow(connected);
 
     setText("ipLabel", connected ? "Защищённый IP" : "IP");
     setText("ipValue", snapshot.publicIp || (connecting || state === "blocked" ? "—" : "Определяем…"));
@@ -397,23 +655,60 @@
     toast.textContent = message;
     toast.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toast.hidden = true; }, 2600);
+    clearTimeout(toastHideTimer);
+    // The toast slides in and out; it is only hidden after the fade-out, so
+    // the dismissal is visible instead of an instant jump.
+    toast.classList.remove("visible");
+    requestAnimationFrame(() => toast.classList.add("visible"));
+    toastTimer = setTimeout(() => {
+      toast.classList.remove("visible");
+      toastHideTimer = setTimeout(() => {
+        if (!toast.classList.contains("visible")) toast.hidden = true;
+      }, 180);
+    }, 2600);
   }
 
   /* ---------- Menus ---------- */
 
+  // Popovers fade in and out. The element stays in the layout until the
+  // fade-out is over, so closing it is seen instead of an instant jump.
+  const popoverTimers = new WeakMap();
+
+  function setPopoverVisible(menu, open) {
+    const timer = popoverTimers.get(menu);
+    if (timer) { clearTimeout(timer); popoverTimers.delete(menu); }
+    const wasOpen = menu.classList.contains("open");
+    if (open) {
+      menu.hidden = false;
+      menu.classList.remove("closing");
+      // The class comes one frame later: otherwise the browser would only
+      // ever see the final state and would not animate at all.
+      afterFirstPaint(() => menu.classList.add("open"));
+      return;
+    }
+    if (!wasOpen && menu.hidden) { menu.classList.remove("closing"); return; }
+    menu.classList.remove("open");
+    menu.classList.add("closing");
+    popoverTimers.set(menu, setTimeout(() => {
+      popoverTimers.delete(menu);
+      if (menu.classList.contains("open")) return;
+      menu.hidden = true;
+      menu.classList.remove("closing");
+    }, 150));
+  }
+
   function setMenu(open) {
-    $("appMenu").hidden = !open;
+    setPopoverVisible($("appMenu"), open);
     $("menuButton").setAttribute("aria-expanded", String(open));
   }
   function closeMenu() { setMenu(false); }
 
   function toggleSortMenu(force) {
     const menu = $("sortMenu");
-    const open = typeof force === "boolean" ? force : menu.hidden;
+    const open = typeof force === "boolean" ? force : !menu.classList.contains("open");
     if (open) menu.querySelectorAll("button[data-sort]").forEach(button =>
       button.setAttribute("aria-checked", String(button.dataset.sort === sortMode)));
-    menu.hidden = !open;
+    setPopoverVisible(menu, open);
     $("sortButton").setAttribute("aria-expanded", String(open));
   }
 
@@ -426,8 +721,13 @@
     serverScrim.hidden = false;
     serverScrim.classList.remove("closing");
     serverSheet.setAttribute("aria-hidden", "false");
-    renderServers(true);
-    requestAnimationFrame(() => serverSheet.classList.add("open"));
+    // The sheet starts moving first; the list is built a frame later, so a
+    // long list never delays the opening animation.
+    afterFirstPaint(() => {
+      serverScrim.classList.add("open");
+      serverSheet.classList.add("open");
+    });
+    afterFrames(3, () => { renderServers(); moveChipIndicator(); });
   }
 
   function closeServers() {
@@ -436,19 +736,19 @@
     sheetOpen = false;
     serverSheet.classList.remove("dragging", "open");
     serverSheet.style.removeProperty("--drag-y");
-    serverScrim.style.opacity = "0";
-    serverScrim.classList.add("closing");
+    serverScrim.classList.remove("open");
+    serverScrim.style.opacity = "";
     serverSheet.setAttribute("aria-hidden", "true");
     setTimeout(() => {
       if (sheetOpen) return;
       serverScrim.hidden = true;
-      serverScrim.style.opacity = "";
+      serverScrim.classList.remove("closing");
       // Free the list while it is not visible.
       serverPager?.disconnect();
       serverPager = null;
       serverList.replaceChildren();
       serversSignature = "";
-    }, 360);
+    }, 240);
     return true;
   }
 
@@ -527,7 +827,9 @@
       armed = false;
       if (!pulling) return;
       pulling = false;
-      suppressClickUntil = performance.now() + 400;
+      // The click that follows a drag must not press the card under the
+      // finger. Only that one click is blocked.
+      suppressNextClick = true;
       target.classList.remove("dragging");
       const y = (event.changedTouches && event.changedTouches[0]?.clientY) || listStart;
       const distance = Math.max(0, y - listStart);
@@ -562,18 +864,29 @@
     clearTimeout(panelCloseTimer);
     panel.classList.remove("dragging", "closing");
     panel.style.removeProperty("--panel-drag-y");
-    panelOverlay.style.opacity = "";
     panelOverlay.classList.remove("closing");
     panelOverlay.hidden = false;
-    if (name === "settings") buildSettings();
-    if (name === "subscriptions") buildSubscriptions();
-    if (name === "logs") buildLogs();
+    panelOverlay.style.removeProperty("--scrim-opacity");
+    // The panel starts moving first; its content is built a frame later, so
+    // the opening animation is not blocked by the DOM work.
+    afterFirstPaint(() => {
+      panelOverlay.classList.add("open");
+      panel.classList.add("open");
+    });
+    const token = ++panelBuildToken;
+    afterFrames(3, () => {
+      if (token !== panelBuildToken) return;
+      if (name === "settings") buildSettings();
+      if (name === "subscriptions") buildSubscriptions();
+      if (name === "logs") buildLogs();
+    });
   }
 
   function resetPanelState() {
     flushSettings();
     panelBackAction = null;
     splitAppsReceiver = null;
+    clearTimeout(pageSwapTimer);
     panelPager?.disconnect();
     panelPager = null;
     refreshBattery = null;
@@ -584,18 +897,19 @@
   function closePanel() {
     if (panelOverlay.hidden) return false;
     resetPanelState();
-    panel.classList.remove("dragging");
+    panelBuildToken++;
+    panel.classList.remove("dragging", "open");
     panel.classList.add("closing");
     panel.style.removeProperty("--panel-drag-y");
-    panelOverlay.style.opacity = "0";
-    panelOverlay.classList.add("closing");
+    panelOverlay.classList.remove("open");
+    panelOverlay.style.removeProperty("--scrim-opacity");
     clearTimeout(panelCloseTimer);
     panelCloseTimer = setTimeout(() => {
       panelOverlay.hidden = true;
       panel.classList.remove("closing");
-      panelOverlay.style.opacity = "";
       panelBody.replaceChildren();
-    }, 360);
+      currentPage = null;
+    }, 260);
     return true;
   }
 
@@ -603,11 +917,13 @@
     bindDrag(panel, [panel.querySelector(".grabber"), panel.querySelector(".panel-header")], panelBody,
       distance => {
         panel.style.setProperty("--panel-drag-y", `${distance}px`);
-        panelOverlay.style.opacity = String(Math.max(0, 1 - distance / (innerHeight * .55)));
+        // Only the backdrop fades; the panel itself must not become
+        // transparent while it is being dragged.
+        panelOverlay.style.setProperty("--scrim-opacity", String(Math.max(0, 1 - distance / (innerHeight * .55))));
       },
       (distance, velocity) => {
         if (distance > 100 || velocity > .65) closePanel();
-        else { panel.style.removeProperty("--panel-drag-y"); panelOverlay.style.opacity = ""; }
+        else { panel.style.removeProperty("--panel-drag-y"); panelOverlay.style.removeProperty("--scrim-opacity"); }
       },
       event => !panelOverlay.hidden && !panel.classList.contains("closing")
         && !event.target.closest?.("button,input,select,textarea,label"),
@@ -615,20 +931,80 @@
   }
 
   // Resets the panel for a new page and returns its emptied body.
+  // The change goes in two steps: first the old page leaves together with
+  // the title (ten pixels aside and a fade), then the new one arrives. The
+  // pages never sit on top of each other: the new page waits hidden while
+  // the old one is still on the screen.
   function page(name, backAction = null) {
+    // A pending deferred build is obsolete now.
+    panelBuildToken++;
     resetPanelState();
-    $("panelTitle").textContent = name;
+    // A transition that never finished should not leave pages behind.
+    panelBody.querySelectorAll(".page-out").forEach(node => node.remove());
+    const goingBack = pageDirection < 0;
     const back = $("panelBack");
     back.hidden = !backAction;
     back.onclick = event => {
       event.preventDefault();
       event.stopPropagation();
-      if (backAction) backAction();
+      if (!backAction) return;
+      // A step back moves the pages the other way.
+      pageDirection = -1;
+      backAction();
+      pageDirection = 1;
     };
     panelBackAction = backAction;
-    panelBody.replaceChildren();
-    panelBody.scrollTop = 0;
-    return panelBody;
+    const outgoing = currentPage;
+    const wrapper = el("div", "page");
+    currentPage = wrapper;
+    if (goingBack) wrapper.classList.add("back");
+    const settle = () => {
+      $("panelTitle").textContent = name;
+      animateTitle(goingBack);
+      wrapper.classList.add("page-in");
+      panelBody.scrollTop = 0;
+    };
+    panelBody.append(wrapper);
+    if (outgoing && !noMotion() && outgoing.style.visibility !== "hidden") {
+      wrapper.style.visibility = "hidden";
+      outgoing.classList.remove("page-in");
+      outgoing.classList.add("page-out");
+      if (goingBack) outgoing.classList.add("back");
+      titleOut(goingBack);
+      pageSwapTimer = setTimeout(() => {
+        outgoing.remove();
+        wrapper.style.visibility = "";
+        settle();
+      }, 140);
+    } else {
+      outgoing?.remove();
+      settle();
+    }
+    pageDirection = 1;
+    return wrapper;
+  }
+
+  // The title of the panel follows its page: the old one leaves with the
+  // old page, the new one arrives with the new page.
+  function titleOut(goingBack) {
+    const title = $("panelTitle");
+    title.classList.remove("title-in");
+    if (goingBack) title.classList.add("back");
+    title.classList.add("title-out");
+  }
+
+  function animateTitle(goingBack = false) {
+    const title = $("panelTitle");
+    title.classList.remove("title-in", "title-out", "back");
+    void title.offsetWidth;
+    if (goingBack) title.classList.add("back");
+    title.classList.add("title-in");
+  }
+
+  // Low-end devices and the "reduce motion" setting get no animation at all.
+  function noMotion() {
+    return document.documentElement.classList.contains("lite")
+      || !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
   }
 
   function group(label, ...rows) {
@@ -693,28 +1069,21 @@
     return node;
   }
 
-  // Toggles look applied the moment they flip, so a page also saves when
-  // the user leaves it (back, close, swipe down, app to background).
-  let pendingSettings = null;
-
+  // Settings save themselves when the user leaves the page; no explicit
+  // "Save" button is needed. Every section adds its own collector, so a tab
+  // can hold several of them at once.
   function saveActions(collect) {
-    pendingSettings = collect;
-    return actions(button("Сохранить", "primary", () => {
-      pendingSettings = null;
-      // Keep the local copy current so a second page saved before Android
-      // answers does not send stale values back.
-      snapshot.settings = { ...(snapshot.settings || {}), ...collect() };
-      native.saveSettings(JSON.stringify(snapshot.settings));
-      buildSettings();
-    }));
+    pendingSettings.push(collect);
+    return el("div");
   }
 
   function flushSettings(stayOnPage = false) {
-    const collect = pendingSettings;
-    if (!stayOnPage) pendingSettings = null;
-    if (!collect) return;
+    const collectors = pendingSettings;
+    if (!stayOnPage) pendingSettings = [];
+    if (!collectors.length) return;
     const current = snapshot.settings || {};
-    const changes = collect();
+    const changes = {};
+    collectors.forEach(collect => Object.assign(changes, collect()));
     // Lists such as Auto servers may come back in another order.
     const same = (a, b) => Array.isArray(a) && Array.isArray(b)
       ? JSON.stringify([...a].sort()) === JSON.stringify([...b].sort())
@@ -725,51 +1094,66 @@
     native.saveSettings(JSON.stringify(snapshot.settings));
   }
 
+  // The settings are a list of categories; every row opens its own page.
   function buildSettings() {
     const body = page("Настройки");
     body.append(
       group("Серверы",
-        navRow("servers", "Подписки", "Источники, HWID и обновление", buildServerSettings),
-        navRow("ping", "Проверка серверов", "Как и когда проверять, что сервер работает", buildPingSettings),
+        navRow("servers", "Подписки", "Ссылки, обновление и HWID", buildServerSettings),
+        navRow("ping", "Проверка серверов", "Как и когда проверять серверы", buildPingSettings),
         navRow("auto", "Автовыбор", "Из каких серверов выбирает Auto", buildAutoSettings)),
       group("Подключение",
-        navRow("connection", "Подключение и защита", "Автоподключение и Kill Switch", buildConnectionSettings),
-        navRow("globe", "DNS и сеть", "DNS, IPv6, локальная сеть и MTU", buildNetworkSettings),
-        navRow("tunnel", "Обход блокировок", "Фрагментация и мультиплексирование", buildTunnelSettings)),
-      group("Трафик",
-        navRow("routing", "Маршрутизация", "Что идёт через VPN, а что напрямую", buildRoutingSettings),
-        navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling),
-        navRow("proxy", "Локальный прокси", "SOCKS5 и HTTP с паролем, хотспот", buildProxySettings)),
+        navRow("connection", "Подключение и защита", "Автоподключение и Kill Switch", buildConnectionSettings)),
+      group("Обход блокировок",
+        navRow("tunnel", "Фрагментация и мультиплексирование", "Помогает против DPI", buildTunnelSettings)),
+      group("Сеть",
+        navRow("globe", "DNS и сеть", "DNS, IPv6, MTU и локальная сеть", buildNetworkSettings),
+        navRow("proxy", "Локальный прокси", "SOCKS5 и HTTP, доступ по хотспоту", buildProxySettings)),
+      group("Маршрутизация",
+        navRow("routing", "Правила маршрутизации", "Что идёт через VPN, а что напрямую", buildRoutingSettings),
+        navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling)),
       group("Приложение",
         navRow("application", "Работа приложения", "Фон и память", buildApplicationSettings),
-        navRow("logs", "Логи", null, () => buildLogs(true)),
+        navRow("logs", "Логи", "События приложения и ядра", () => buildLogs(true)),
         navRow("about", "О приложении", `Версия ${snapshot.appVersion || "—"}`, buildAbout)));
   }
 
   function buildServerSettings() {
-    const body = page("Подписки", buildSettings);
+    const body = page("Подписки", () => buildSettings());
+    body.append(serverSettingsContent());
+  }
+
+  function serverSettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const sourceCount = [snapshot.subscriptions?.wifi, snapshot.subscriptions?.lte].filter(Boolean).length;
     const autoUpdate = selectControl([["15","Каждые 15 минут"],["60","Каждый час"],["360","Каждые 6 часов"],["1440","Раз в сутки"],["off","Выключено"]], s.autoUpdate);
     const updateOnOpen = switchControl(!!s.updateOnOpen);
     const notifyUpdates = switchControl(!!s.notifyUpdates);
     const sendHwid = switchControl(s.sendHwid !== false);
-    body.append(group("Источники",
-      row("Ссылки на подписку", `Настроено ${sourceCount} из 2`,
-        button("Изменить", "secondary", () => buildSubscriptions(true), true)),
-      row("Отправлять HWID", "Без него панель может не выдать подписку", sendHwid)));
-    body.append(group("Обновление",
-      row("Автообновление", "Не прерывает активное подключение", autoUpdate),
-      row("Обновлять при запуске", "Загружать подписку при открытии приложения", updateOnOpen),
-      row("Уведомлять об обновлениях", "Сколько серверов добавилось и пропало", notifyUpdates)));
-    body.append(saveActions(() => ({
-      autoUpdate: autoUpdate.value, updateOnOpen: isOn(updateOnOpen),
-      notifyUpdates: isOn(notifyUpdates), sendHwid: isOn(sendHwid)
-    })));
+    fragment.append(
+      group("Подписки",
+        row("Ссылки на подписку", `Настроено ${sourceCount} из 2`,
+          button("Изменить", "secondary", () => buildSubscriptions(true), true)),
+        row("Отправлять HWID", "Без него панель может не выдать подписку", sendHwid)),
+      group("Обновление",
+        row("Автообновление", "Не прерывает активное подключение", autoUpdate),
+        row("Обновлять при запуске", "Загружать подписку при открытии приложения", updateOnOpen),
+        row("Уведомлять об обновлениях", "Сколько серверов добавилось и пропало", notifyUpdates)),
+      saveActions(() => ({
+        autoUpdate: autoUpdate.value, updateOnOpen: isOn(updateOnOpen),
+        notifyUpdates: isOn(notifyUpdates), sendHwid: isOn(sendHwid)
+      })));
+    return fragment;
   }
 
   function buildPingSettings() {
-    const body = page("Проверка серверов", buildSettings);
+    const body = page("Проверка серверов", () => buildSettings());
+    body.append(pingSettingsContent());
+  }
+
+  function pingSettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const method = selectControl([["real","Полная"],["tcp","Быстрая"]], s.pingMethod === "tcp" ? "tcp" : "real");
     const methodHint = {
@@ -782,27 +1166,33 @@
     method.addEventListener("change", () => { methodDetail.textContent = methodHint[method.value]; });
     const pingOnOpen = switchControl(!!s.pingOnOpen);
     const pingAfterUpdate = switchControl(!!s.pingAfterUpdate);
-    body.append(
-      group("Проверка", methodRow),
+    fragment.append(
+      group("Проверка серверов", methodRow),
       group("Когда проверять",
         row("При запуске", "Для сохранённого списка серверов", pingOnOpen),
         row("После обновления", "Когда подписка загружена заново", pingAfterUpdate)),
-      el("p", "group-note", "Auto и балансировщики всегда выбирают среди серверов, прошедших полную проверку."));
-    body.append(saveActions(() => ({
-      pingMethod: method.value, pingOnOpen: isOn(pingOnOpen), pingAfterUpdate: isOn(pingAfterUpdate)
-    })));
+      el("p", "group-note", "Auto и балансировщики всегда выбирают среди серверов, прошедших полную проверку."),
+      saveActions(() => ({
+        pingMethod: method.value, pingOnOpen: isOn(pingOnOpen), pingAfterUpdate: isOn(pingAfterUpdate)
+      })));
+    return fragment;
   }
 
   function buildAutoSettings() {
-    const body = page("Автовыбор", buildSettings);
+    const body = page("Автовыбор", () => buildSettings());
+    body.append(autoSettingsContent());
+  }
+
+  function autoSettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const servers = snapshot.servers.filter(server => !server.auto);
     const saved = new Set(s.autoProfiles || []);
     const chosen = new Set(servers.filter(server => !saved.size || saved.has(server.id)).map(server => server.id));
-    body.append(el("p", "group-note", "Auto подключается к самому быстрому из отмеченных серверов, который прошёл проверку."));
-    body.append(el("div", "group-label", "Серверы для автовыбора"));
+    fragment.append(el("div", "group-label", "Автовыбор"));
+    fragment.append(el("p", "group-note", "Auto подключается к самому быстрому из отмеченных серверов, который прошёл проверку."));
     const list = el("div", "list");
-    body.append(list);
+    fragment.append(list);
     if (!servers.length) list.append(row("Список серверов пуст", "Добавьте или обновите подписку"));
     else panelPager = lazyList(list, servers, server => {
       const label = row(server.name, null, null, "label");
@@ -814,32 +1204,44 @@
       label.append(check);
       return label;
     }, panelBody, 40);
-    body.append(saveActions(() => ({
+    fragment.append(saveActions(() => ({
       autoProfiles: chosen.size === servers.length ? [] : servers.filter(server => chosen.has(server.id)).map(server => server.id)
     })));
+    return fragment;
   }
 
   function buildConnectionSettings() {
-    const body = page("Подключение и защита", buildSettings);
+    const body = page("Подключение и защита", () => buildSettings());
+    body.append(connectionSettingsContent());
+  }
+
+  function connectionSettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const killSwitch = switchControl(!!s.killSwitch);
     const autoConnectOpen = switchControl(!!s.autoConnectOpen);
     const autoConnectBoot = switchControl(!!s.autoConnectBoot);
-    body.append(
+    fragment.append(
       group("Автоподключение",
         row("При запуске приложения", "К выбранному серверу", autoConnectOpen),
         row("При загрузке устройства", "Если разрешение на VPN уже выдано", autoConnectBoot)),
       group("Защита",
         row("Kill Switch", "Без интернета, пока VPN не подключится или если сервер пропал", killSwitch),
         row("Системная блокировка", "Если Android остановит приложение: «Постоянная VPN» и «Блокировать без VPN»",
-          button("Открыть", "secondary", () => native.openVpnSettings(), true))));
-    body.append(saveActions(() => ({
-      autoConnectOpen: isOn(autoConnectOpen), autoConnectBoot: isOn(autoConnectBoot), killSwitch: isOn(killSwitch)
-    })));
+          button("Открыть", "secondary", () => native.openVpnSettings(), true))),
+      saveActions(() => ({
+        autoConnectOpen: isOn(autoConnectOpen), autoConnectBoot: isOn(autoConnectBoot), killSwitch: isOn(killSwitch)
+      })));
+    return fragment;
   }
 
   function buildNetworkSettings() {
-    const body = page("DNS и сеть", buildSettings);
+    const body = page("DNS и сеть", () => buildSettings());
+    body.append(networkSettingsContent());
+  }
+
+  function networkSettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const dns = selectControl([["subscription-doh","Из подписки"],["cloudflare","Cloudflare"],["google","Google"],["quad9","Quad9"],["custom","Свой"]], s.dnsProvider);
     const customDns = el("textarea", "field");
@@ -874,22 +1276,28 @@
     syncIpType();
     const lan = switchControl(s.lanDirect !== false);
     const mtu = selectControl([["1280","1280"],["1360","1360"],["1400","1400"],["1500","1500"]], s.tunMtu || "1400");
-    body.append(
+    fragment.append(
       group("DNS", dnsRow, customRow),
       el("p", "group-note", "Все DNS-запросы идут через VPN, провайдер их не видит."),
-      group("Сеть",
+      group("Туннель",
         row("IPv6", "Включайте, если сервер поддерживает IPv6", ipv6),
         ipTypeRow,
         row("Локальная сеть напрямую", "Роутер, принтеры и трансляция на ТВ без VPN", lan),
-        row("MTU туннеля", "1400 подходит для большинства сетей", mtu)));
-    body.append(saveActions(() => ({
-      dnsProvider: dns.value, customDns: customDns.value, tunMtu: mtu.value,
-      ipv6Enabled: isOn(ipv6), ipType: ipType.value, lanDirect: isOn(lan)
-    })));
+        row("MTU туннеля", "1400 подходит для большинства сетей", mtu)),
+      saveActions(() => ({
+        dnsProvider: dns.value, customDns: customDns.value, tunMtu: mtu.value,
+        ipv6Enabled: isOn(ipv6), ipType: ipType.value, lanDirect: isOn(lan)
+      })));
+    return fragment;
   }
 
   function buildRoutingSettings() {
-    const body = page("Маршрутизация", buildSettings);
+    const body = page("Маршрутизация", () => buildSettings());
+    body.append(routingSettingsContent());
+  }
+
+  function routingSettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const mode = selectControl([["full","Весь трафик"],["bypass","Кроме правил"],["proxy_only","Только правила"]], s.routingMode);
     const modeHint = {
@@ -919,7 +1327,7 @@
     const subscriptionRules = switchControl(s.subscriptionRules !== false);
     const routeOnly = switchControl(!!s.routeOnly);
     const blockUdp = switchControl(!!s.blockUdp);
-    body.append(
+    fragment.append(
       group("Свои правила", modeRow, rulesRow),
       group("Подписка",
         row("Правила из подписки", "Маршруты, которые задал провайдер в Xray JSON", subscriptionRules)),
@@ -937,14 +1345,15 @@
     const geoSiteRow = row("GeoSite", "Списки доменов для geosite:", geoSite);
     geoIPRow.classList.add("stack");
     geoSiteRow.classList.add("stack");
-    body.append(
+    fragment.append(
       group("Источники списков", geoIPRow, geoSiteRow),
-      el("p", "group-note", "Списки скачиваются при первом подключении с такими правилами и обновляются раз в неделю. Оставьте поля пустыми, чтобы использовать источники по умолчанию."));
-    body.append(saveActions(() => ({
-      routingMode: mode.value, routingRules: rules.value, subscriptionRules: isOn(subscriptionRules),
-      routeOnly: isOn(routeOnly), blockUdp: isOn(blockUdp),
-      geoipUrl: geoIP.value.trim(), geositeUrl: geoSite.value.trim()
-    })));
+      el("p", "group-note", "Списки скачиваются при первом подключении с такими правилами и обновляются раз в неделю. Оставьте поля пустыми, чтобы использовать источники по умолчанию."),
+      saveActions(() => ({
+        routingMode: mode.value, routingRules: rules.value, subscriptionRules: isOn(subscriptionRules),
+        routeOnly: isOn(routeOnly), blockUdp: isOn(blockUdp),
+        geoipUrl: geoIP.value.trim(), geositeUrl: geoSite.value.trim()
+      })));
+    return fragment;
   }
 
   function appIcon(item) {
@@ -965,7 +1374,12 @@
   }
 
   function buildSplitTunneling() {
-    const body = page("Раздельное туннелирование", buildSettings);
+    const body = page("Раздельное туннелирование", () => buildSettings());
+    body.append(splitTunnelingContent());
+  }
+
+  function splitTunnelingContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const selected = new Set(s.appRoutingPackages || []);
     let data = { apps: [] };
@@ -981,7 +1395,7 @@
       label.append(radio);
       modes.append(label);
     });
-    body.append(el("div", "group-label", "Режим"), modes, el("div", "group-label", "Приложения"));
+    fragment.append(el("div", "group-label", "Режим"), modes, el("div", "group-label", "Приложения"));
 
     const searchWrap = el("div", "search");
     const search = el("input", "field");
@@ -991,7 +1405,7 @@
     const list = el("div", "list");
     list.append(el("div", "loading"));
     list.firstChild.append(el("i"), el("span", null, "Загружаем приложения…"));
-    body.append(searchWrap, list);
+    fragment.append(searchWrap, list);
 
     // Icons are requested from Android only when their row is near the viewport.
     appIconObserver = "IntersectionObserver" in window ? new IntersectionObserver(entries => {
@@ -1046,25 +1460,37 @@
       try { splitAppsReceiver(native.getInstalledApps() || '{"apps":[]}'); }
       catch (_) { splitAppsReceiver({ apps: [] }); }
     }
-    body.append(saveActions(() => ({
+    fragment.append(saveActions(() => ({
       appRoutingMode: modes.querySelector("input:checked")?.value || "all",
       appRoutingPackages: [...selected]
     })));
+    return fragment;
   }
 
   function buildTunnelSettings() {
-    const body = page("Обход блокировок", buildSettings);
+    const body = page("Обход блокировок", () => buildSettings());
+    body.append(tunnelSettingsContent());
+  }
+
+  function tunnelSettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const fragmentation = switchControl(!!s.fragmentation);
     const mux = switchControl(!!s.mux);
-    body.append(group(null,
+    fragment.append(group("Протокол",
       row("Фрагментация TLS", "Делит ClientHello, помогает против DPI", fragmentation),
       row("Мультиплексирование", "Mux: несколько соединений в одном. Не для Vision и XHTTP", mux)));
-    body.append(saveActions(() => ({ fragmentation: isOn(fragmentation), mux: isOn(mux) })));
+    fragment.append(saveActions(() => ({ fragmentation: isOn(fragmentation), mux: isOn(mux) })));
+    return fragment;
   }
 
   function buildProxySettings() {
-    const body = page("Локальный прокси", buildSettings);
+    const body = page("Локальный прокси", () => buildSettings());
+    body.append(proxySettingsContent());
+  }
+
+  function proxySettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const enabled = switchControl(!!s.proxyEnabled);
     const http = switchControl(!!s.proxyHttp);
@@ -1081,7 +1507,7 @@
     };
     const socksPort = portField(s.proxySocksPort, "10808");
     const httpPort = portField(s.proxyHttpPort, "10809");
-    body.append(
+    fragment.append(
       el("p", "group-note", "Другие приложения на телефоне видят открытые порты, поэтому прокси работает только с логином и паролем."),
       group("Прокси",
         row("SOCKS5-прокси", "Через то же подключение, что и VPN", enabled),
@@ -1101,12 +1527,12 @@
     };
     const addressRow = row("Адрес", null);
     addressRow.querySelector(".row-copy").append(address);
-    body.append(group("Подключение",
+    fragment.append(group("Подключение",
       addressRow,
       credentialRow("Логин", user, () => snapshot.settings?.proxyUser),
       credentialRow("Пароль", pass, () => snapshot.settings?.proxyPass)));
-    body.append(actions(button("Сбросить логин и пароль", "secondary", () => native.resetProxyCredentials())));
-    body.append(group("Режим",
+    fragment.append(actions(button("Сбросить логин и пароль", "secondary", () => native.resetProxyCredentials())));
+    fragment.append(group("Режим",
       row("Только прокси, без VPN", "Без туннеля и значка VPN: прокси нужно указать в приложениях вручную", only)));
 
     refreshProxy = settings => {
@@ -1122,14 +1548,20 @@
     [socksPort, httpPort].forEach(field => field.addEventListener("input", sync));
     sync();
 
-    body.append(saveActions(() => ({
+    fragment.append(saveActions(() => ({
       proxyEnabled: isOn(enabled), proxyHttp: isOn(http), proxyLan: isOn(lan), proxyOnly: isOn(only),
       proxySocksPort: socksPort.value, proxyHttpPort: httpPort.value
     })));
+    return fragment;
   }
 
   function buildApplicationSettings() {
-    const body = page("Работа приложения", buildSettings);
+    const body = page("Работа приложения", () => buildSettings());
+    body.append(applicationSettingsContent());
+  }
+
+  function applicationSettingsContent() {
+    const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const battery = row("Работа в фоне", null,
       button("", "secondary", () => native.openBatterySettings(), true));
@@ -1144,34 +1576,41 @@
     };
     refreshBattery(!!s.batteryUnrestricted);
     const memory = selectControl([["0","Без ограничения"],["40","40 МБ"],["60","60 МБ"],["80","80 МБ"],["100","100 МБ"],["150","150 МБ"]], s.memoryLimit || "0");
-    body.append(
+    fragment.append(
       group("Фоновая работа", battery),
-      group("Ресурсы", row("Память ядра", "Лимит помогает на слабых устройствах", memory)));
-    body.append(saveActions(() => ({ memoryLimit: memory.value })));
+      group("Память", row("Память ядра", "Лимит помогает на слабых устройствах", memory)),
+      saveActions(() => ({ memoryLimit: memory.value })));
+    return fragment;
   }
 
   function buildAbout() {
-    const body = page("О приложении", buildSettings);
+    const body = page("О приложении", () => buildSettings());
+    body.append(aboutContent());
+  }
+
+  function aboutContent() {
+    const fragment = document.createDocumentFragment();
     const head = el("div", "about-head");
     const logo = el("img");
     logo.src = "logo.png"; logo.alt = ""; logo.width = 56; logo.height = 56;
     head.append(logo, el("h3", null, "ShadowVPN"), el("p", null, `Версия ${snapshot.appVersion || "—"}`));
-    body.append(head);
+    fragment.append(head);
 
     const hwid = snapshot.settings?.hwid || "Недоступно";
     const hwidRow = row("HWID", hwid, button("Копировать", "secondary", () => native.copyText(snapshot.settings?.hwid || ""), true));
     hwidRow.querySelector("small").classList.add("mono");
-    body.append(group("Устройство", hwidRow));
-    body.append(group("Компоненты",
+    fragment.append(group("Устройство", hwidRow));
+    fragment.append(group("Компоненты",
       valueRow("Ядро", "Xray Core"),
       valueRow("QUIC и Naive", "Cronet"),
       valueRow("TLS-отпечаток", "uTLS · Chrome 152"),
       valueRow("Протоколы", "VLESS, VMess, Trojan, Shadowsocks, Hysteria2, Naive"),
       valueRow("Платформа", "Android 10+ · arm64, x86_64")));
+    return fragment;
   }
 
   function buildSubscriptions(fromSettings = false) {
-    const body = page("Подписки", fromSettings ? buildServerSettings : null);
+    const body = page("Подписки", fromSettings ? () => buildServerSettings() : null);
     const slots = snapshot.subscriptions || {wifi:"",lte:""};
     const slot = (kind, iconName, name, hint) => {
       const node = el("div", "row stack");
@@ -1213,16 +1652,16 @@
   }
 
   function buildLogs(fromSettings = false) {
-    const body = page("Логи", fromSettings ? buildSettings : null);
+    const body = page("Логи", fromSettings ? () => buildSettings() : null);
     const log = el("pre", "log-box", native.getLogs() || "Событий пока нет");
     body.append(log, actions(button("Копировать", "secondary", () => native.copyText(log.textContent))));
   }
 
   function closeTopLayer() {
-    if (!$("appMenu").hidden) { closeMenu(); return true; }
+    if ($("appMenu").classList.contains("open")) { closeMenu(); return true; }
     if (!panelOverlay.hidden && panelBackAction) { panelBackAction(); return true; }
     if (closePanel()) return true;
-    if (!$("sortMenu").hidden) { toggleSortMenu(false); return true; }
+    if ($("sortMenu").classList.contains("open")) { toggleSortMenu(false); return true; }
     if (sheetOpen) return closeServers();
     return false;
   }
@@ -1232,7 +1671,7 @@
   document.addEventListener("visibilitychange", () => { if (document.hidden) flushSettings(true); });
 
   $("powerButton").addEventListener("click", () => native.toggleVpn());
-  $("menuButton").addEventListener("click", event => { event.stopPropagation(); setMenu($("appMenu").hidden); });
+  $("menuButton").addEventListener("click", event => { event.stopPropagation(); setMenu(!$("appMenu").classList.contains("open")); });
   document.addEventListener("click", event => {
     if (!event.target.closest(".app-menu,#menuButton")) closeMenu();
     if (!event.target.closest("#sortMenu,#sortButton")) toggleSortMenu(false);
@@ -1244,6 +1683,23 @@
   $("closeServers").addEventListener("click", closeServers);
   serverScrim.addEventListener("click", closeServers);
   $("selectedServerButton").addEventListener("click", openServers);
+  // One handler for the whole list: the cards are reused between renders, so
+  // they carry no listeners of their own.
+  serverList.addEventListener("click", event => {
+    const card = event.target.closest(".server-card");
+    if (!card || !serverList.contains(card)) return;
+    // A tap on the latency checks this one server again instead of picking it.
+    const server = serverModels.get(card.dataset.id);
+    if (event.target.closest(".latency") && server && !server.auto && !snapshot.pingRunning && native.pingServer) {
+      if (server.checking) return;
+      server.checking = true;
+      updateServerCard(card, server);
+      native.pingServer(server.id);
+      return;
+    }
+    native.selectServer(card.dataset.id);
+    window.setTimeout(closeServers, 110);
+  });
   $("categories").addEventListener("click", event => {
     const item = event.target.closest("button[data-category]");
     if (!item) return;
@@ -1276,6 +1732,12 @@
   window.ShadowVPN = {
     render,
     closeTopLayer,
+    // A check starts: every host waits for its own answer again.
+    pingStarted() { clearPingResults(); },
+    // One host answered: show its latency right away.
+    pingResult(item) { applyPingResult(item); },
+    // The selection changed: mark the card without rebuilding the list.
+    selectedServer(id) { applySelectedServer(id); },
     installedApps(payload) { if (splitAppsReceiver) splitAppsReceiver(payload); },
     appIcon(packageName, source) {
       panelBody.querySelectorAll(".app-icon").forEach(slot => {
@@ -1294,12 +1756,13 @@
     mockServers.push({id:`s${i}`,source:i % 5 === 0 ? "LTE" : "Wi-Fi",name:`${code.toUpperCase()} ${i + 1} | ${["Hysteria","Torrent","Gemini | gRPC","WARP"][i % 4]}`,countryCode:code,protocol:"VLESS",transport:["TCP","GRPC","WS"][i % 3],format:i % 3 === 0 ? "json" : "",auto:false,selected:i === 0,latency:i % 7 === 6 ? 0 : 40 + (i * 37) % 500,available:i % 7 !== 6});
   }
   mockServers.splice(1, 0, {id:"group",name:"Авто-выбор 🚀",countryCode:"",protocol:"BALANCER",transport:"",members:8,format:"json",source:"Wi-Fi",auto:false,selected:false,latency:52,available:true});
+  mockServers[1].subscription = {title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000};
   const mockApps = Array.from({length: 180}, (_, i) => ({name:`Приложение ${i + 1}`,packageName:`com.example.app${i + 1}`}));
   native.getInstalledApps = () => JSON.stringify({apps: mockApps});
   render({
     state:"connected",serviceStatus:"Подключено",needsSubscription:false,importRunning:false,pingRunning:false,message:"",appVersion:"0.16.0",
     publicIp:"132.243.***",session:"00:02:18",traffic:{downloadSpeed:"25,7 КБ/с",downloadTotal:"6,1 МБ",uploadSpeed:"58,8 КБ/с",uploadTotal:"135 КБ"},
-    selected:{...mockServers[1],subscription:{title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000}},
+    selectedId:mockServers[1].id,
     servers:mockServers,
     subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
     settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,killSwitch:false,mux:false,ipType:"auto",routeOnly:false,blockUdp:false,memoryLimit:"0",proxyEnabled:true,proxyHttp:true,proxySocksPort:"10808",proxyHttpPort:"10809",proxyLan:true,proxyOnly:false,proxyUser:"svpnA7kq",proxyPass:"Xm4tQ9rWb2nLp8Vz",proxyAddresses:["192.168.43.1"],dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"real",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
@@ -1308,12 +1771,30 @@
   if (params.has("blocked")) render({ state:"blocked", serviceStatus:"Ошибка: сервер не отвечает", publicIp:"" });
   if (params.has("error")) render({ state:"error", serviceStatus:"Ошибка: не удалось подключиться к серверу", publicIp:"85.95.178.108" });
   const preview = params.get("preview");
-  if (preview === "servers") openServers();
+  if (preview === "servers") { openServers(); renderServers(true); }
   if (preview === "menu") setMenu(true);
   if (preview === "welcome") render({ needsSubscription:true });
-  if (["settings", "subscriptions", "logs"].includes(preview)) openPanel(preview);
+  if (["settings", "subscriptions", "logs"].includes(preview)) {
+    openPanel(preview);
+    ({ settings:buildSettings, subscriptions:buildSubscriptions, logs:buildLogs })[preview]();
+  }
   if (["providers", "ping", "network", "connection", "tunnel", "proxy", "routing", "split", "application", "about", "auto"].includes(preview)) {
     openPanel("settings");
     ({ providers:buildServerSettings, ping:buildPingSettings, network:buildNetworkSettings, connection:buildConnectionSettings, tunnel:buildTunnelSettings, proxy:buildProxySettings, routing:buildRoutingSettings, split:buildSplitTunneling, application:buildApplicationSettings, about:buildAbout, auto:buildAutoSettings })[preview]();
+  }
+  if (preview === "tab") {
+    openPanel("settings");
+    buildSettings();
+  }
+  // The preview is a still picture: it has no time to wait for the opening
+  // animation, so the layers are put into their final state right away.
+  document.documentElement.classList.add("no-anim");
+  if (sheetOpen) {
+    serverScrim.classList.add("open");
+    serverSheet.classList.add("open");
+  }
+  if (!panelOverlay.hidden) {
+    panelOverlay.classList.add("open");
+    panel.classList.add("open");
   }
 })();

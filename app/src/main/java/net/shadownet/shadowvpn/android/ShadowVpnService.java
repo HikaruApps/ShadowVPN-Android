@@ -29,6 +29,8 @@ public final class ShadowVpnService extends VpnService {
     public static final String STOP = "net.shadownet.shadowvpn.STOP";
     public static volatile String status = "Отключено";
     public static volatile boolean connected = false;
+    /** Non-fatal warning from the current connection, shown separately by the activity. */
+    public static volatile String warning = "";
     /** Kill Switch holds the TUN without a core: apps have no internet until it reconnects. */
     public static volatile boolean blocked = false;
     private static final Deque<String> logs = new ArrayDeque<>();
@@ -71,6 +73,7 @@ public final class ShadowVpnService extends VpnService {
 
     private void connect() {
         retryGeneration++;
+        warning = "";
         SharedPreferences preferences = CoreConfig.preferences(this);
         boolean proxyOnly = CoreConfig.proxyOnly(preferences);
         // Without a TUN there is nothing a Kill Switch could hold.
@@ -96,6 +99,13 @@ public final class ShadowVpnService extends VpnService {
             if (killSwitch) establishTunnel(preferences);
             addLog("Подготовка " + (profileId.startsWith(AUTO_PREFIX) ? "Auto" : "профиля " + profileId));
             Bridge.prepare(profileId);
+            try {
+                String lastWarning = Bridge.lastWarning();
+                if (lastWarning != null && !lastWarning.trim().isEmpty()) {
+                    warning = lastWarning;
+                    addLog("Предупреждение: " + lastWarning);
+                }
+            } catch (Exception ignored) { }
             if (proxyOnly) {
                 Bridge.startProxy();
             } else {
@@ -354,7 +364,7 @@ public final class ShadowVpnService extends VpnService {
         return new Notification.Builder(this, "vpn")
                 .setContentTitle("ShadowVPN")
                 .setContentText(text)
-                .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+                .setSmallIcon(R.drawable.ic_stat_shadowvpn)
                 .setContentIntent(open)
                 .setOngoing(true)
                 .build();

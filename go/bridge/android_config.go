@@ -125,16 +125,32 @@ func androidRuntimeConfig(config []byte, options androidRuntimeOptions) ([]byte,
 		if options.GeoData != nil {
 			info, err = options.GeoData(needIP, needSite)
 		}
+		// In "only listed via VPN" the user's rules ARE what goes through the
+		// VPN: dropping one would send those sites around it. There a missing
+		// list stops the connection. Everywhere else a dropped rule only sends
+		// more traffic through the VPN, so it is skipped with a warning.
+		lenient := options.RoutingMode != "proxy_only"
 		if err != nil {
-			// The user's own geo rules cannot work without the lists, so say
-			// so. Subscription rules are an extra: connect without them.
+			// GeoData is an extra, not a requirement: the lists are large and
+			// a slow or blocked download must not stop the tunnel.
 			if userNeedsGeoData(rules, userRules) {
+				if !lenient {
+					return nil, err
+				}
+				setRuntimeWarning("Списки маршрутизации недоступны: правила geosite/geoip отключены, трафик идёт через VPN")
+			} else {
+				setRuntimeWarning("Списки маршрутизации недоступны: правила подписки geosite/geoip отключены")
+			}
+			rules = stripGeoRules(rules)
+			info = geoDataInfo{}
+		} else {
+			var missing string
+			if rules, missing, err = dropMissingGeoCodes(rules, userRules, info, lenient); err != nil {
 				return nil, err
 			}
-			info = geoDataInfo{}
-		}
-		if rules, err = dropMissingGeoCodes(rules, userRules, info); err != nil {
-			return nil, err
+			if missing != "" {
+				setRuntimeWarning("Список " + missing + " не найден — правило отключено, трафик идёт через VPN")
+			}
 		}
 		if needIP, needSite = geoDataNeeds(rules); needIP || needSite {
 			document["env"] = map[string]any{"XRAY_LOCATION_ASSET": info.Directory}
@@ -296,10 +312,57 @@ func routingDomainStrategy(rules []any, options androidRuntimeOptions) string {
 	return "AsIs"
 }
 
+// stripGeoRules removes the geosite:/geoip: values from the rules. Xray
+// refuses to start with a code it cannot read, so the values have to go when
+// the lists are missing. A rule that keeps other matchers stays; one without
+// any matcher left is dropped, because an empty rule would match everything.
+func stripGeoRules(rules []any) []any {
+	result := make([]any, 0, len(rules))
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		catchAll := isCatchAllRule(rule)
+		matchers := 0
+		for _, key := range []string{"domain", "ip"} {
+			values := ruleValues(rule[key])
+			if len(values) == 0 {
+				continue
+			}
+			kept := make([]string, 0, len(values))
+			for _, value := range values {
+				prefix, _, found := strings.Cut(strings.TrimPrefix(value, "!"), ":")
+				if found && (strings.ToLower(prefix) == "geosite" || strings.ToLower(prefix) == "geoip") {
+					continue
+				}
+				kept = append(kept, value)
+			}
+			if len(kept) > 0 {
+				matchers += len(kept)
+			}
+			rule[key] = kept
+		}
+		for key := range rule {
+			switch key {
+			case "type", "inboundTag", "outboundTag", "balancerTag", "domain", "ip":
+			default:
+				matchers++
+			}
+		}
+		if matchers == 0 && !catchAll {
+			continue
+		}
+		result = append(result, rule)
+	}
+	return result
+}
+
 // dropMissingGeoCodes removes geosite:/geoip: values absent from the data
 // files, which would otherwise stop Xray from starting. A missing code in the
 // user's own rules is reported; in subscription rules it is skipped.
-func dropMissingGeoCodes(rules []any, userRules map[int]bool, info geoDataInfo) ([]any, error) {
+func dropMissingGeoCodes(rules []any, userRules map[int]bool, info geoDataInfo, lenient bool) ([]any, string, error) {
+	missing := ""
 	result := make([]any, 0, len(rules))
 	for index, raw := range rules {
 		rule, ok := raw.(map[string]any)
@@ -324,7 +387,12 @@ func dropMissingGeoCodes(rules []any, userRules map[int]bool, info geoDataInfo) 
 					code, _, _ = strings.Cut(strings.TrimPrefix(code, "!"), "@")
 					if !info.has(file, code) {
 						if userRules[index] {
-							return nil, fmt.Errorf("Список %s не найден в %s", value, file)
+							if !lenient {
+								return nil, "", fmt.Errorf("Список %s не найден в %s", value, file)
+							}
+							if missing == "" {
+								missing = value
+							}
 						}
 						continue
 					}
@@ -340,7 +408,7 @@ func dropMissingGeoCodes(rules []any, userRules map[int]bool, info geoDataInfo) 
 			result = append(result, rule)
 		}
 	}
-	return result, nil
+	return result, missing, nil
 }
 
 func isCatchAllRule(rule map[string]any) bool {
