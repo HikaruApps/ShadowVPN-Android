@@ -16,6 +16,7 @@ import android.graphics.Insets;
 import android.graphics.drawable.Drawable;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.TrafficStats;
 import android.net.Uri;
 import android.net.VpnService;
@@ -128,7 +129,11 @@ public final class MainActivity extends Activity {
     private ConnectivityManager.NetworkCallback networkWatcher;
     private Network watchedNetwork;
     private final Runnable networkRecheck = () -> {
-        if (!pingRunning && !pingResults.isEmpty()) runPings();
+        // Not while a connection is being set up: the check would compete
+        // with it for the network.
+        if (pingRunning || pingResults.isEmpty()
+                || "Подключение…".equals(ShadowVpnService.status)) return;
+        runPings();
     };
 
     private final Runnable statusUpdater = new Runnable() {
@@ -232,6 +237,12 @@ public final class MainActivity extends Activity {
         if (manager == null || networkWatcher != null) return;
         networkWatcher = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) {
+                // Our own VPN coming up is not a new network to measure from.
+                try {
+                    NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
+                    if (capabilities != null
+                            && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return;
+                } catch (RuntimeException ignored) { }
                 ui.post(() -> {
                     Network previous = watchedNetwork;
                     watchedNetwork = network;

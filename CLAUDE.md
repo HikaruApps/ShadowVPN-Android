@@ -87,7 +87,8 @@ Three layers, all in one process:
      `realping.go` (server check through the server's own outbound with chains/fragmentation,
      two HTTPS requests; `verifiedPingProfiles` = TCP for all, real check of the fastest, used by
      Auto and balancers), `xray_dialer.go` (Xray's process-wide dialer state: every `core.New`
-     claims it, so probes hand it back to the running VPN and chain probes/switches serialize),
+     claims it, so probes hand it back to the running VPN and switches serialize; probes drop a
+     chained freedom hop and use built-in fragmentation, so they never need that state),
      `cache.go` (profile cache,
      GeoData download with codes recorded in `meta.json`).
    - `subscription.go` (share links), `dns.go`, `bootstrap.go`, `auto.go`, `ping.go`,

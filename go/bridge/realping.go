@@ -43,19 +43,17 @@ func realPingProfile(parent context.Context, profile Profile, fragmentation bool
 	if err != nil {
 		return 0, err
 	}
-	outbound, err := configuredOutbound(resolved, "proxy", fragmentation && len(resolved.chain) == 0)
+	probe, chained, err := withoutDialerChain(resolved)
 	if err != nil {
 		return 0, err
 	}
-	outbounds := []any{outbound}
-	for _, hop := range resolved.chain {
-		clone, err := cloneObject(hop)
-		if err != nil {
-			return 0, err
-		}
-		outbounds = append(outbounds, clone)
+	// The chain's freedom hop is how Xray JSON spells TLS fragmentation; the
+	// probe gets the same effect from the built-in fragmentation instead.
+	outbound, err := configuredOutbound(probe, "proxy", fragmentation || chained)
+	if err != nil {
+		return 0, err
 	}
-	config, err := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "none"}, "outbounds": outbounds})
+	config, err := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "none"}, "outbounds": []any{outbound}})
 	if err != nil {
 		return 0, err
 	}
@@ -63,32 +61,47 @@ func realPingProfile(parent context.Context, profile Profile, fragmentation bool
 	if err != nil {
 		return 0, err
 	}
-	chained := len(resolved.chain) > 0
-	if chained {
-		// The chain resolves its hops through the process-wide outbound
-		// manager, which must be this instance for the whole probe.
-		xrayDialerMu.Lock()
-		defer xrayDialerMu.Unlock()
-	} else {
-		xrayDialerMu.RLock()
-	}
+	xrayDialerMu.RLock()
 	instance, err := newXrayInstance(parsed)
-	if !chained {
-		// Nothing here dials through the manager; hand it straight back.
-		restoreActiveDialer()
-		xrayDialerMu.RUnlock()
-	}
+	// Nothing in a probe dials through the process-wide manager; hand it
+	// straight back to the running VPN.
+	restoreActiveDialer()
+	xrayDialerMu.RUnlock()
 	if err != nil {
 		return 0, err
 	}
 	defer instance.Close()
-	if chained {
-		defer restoreActiveDialer()
-	}
 	if err := instance.Start(); err != nil {
 		return 0, err
 	}
 	return measureThroughInstance(ctx, instance)
+}
+
+// withoutDialerChain returns the profile with its dialer chain removed.
+// Xray resolves sockopt.dialerProxy only through its single process-wide
+// outbound manager, so chained probes could only run one at a time (and
+// Auto waited for them in turn before connecting). Imported chains are
+// always one freedom hop (see profileFromOutbound), so dropping it loses
+// nothing a probe needs.
+func withoutDialerChain(profile Profile) (Profile, bool, error) {
+	if len(profile.chain) == 0 {
+		return profile, false, nil
+	}
+	outbound, err := cloneObject(profile.outbound)
+	if err != nil {
+		return Profile{}, false, err
+	}
+	if stream, ok := outbound["streamSettings"].(map[string]any); ok {
+		if sockopt, ok := stream["sockopt"].(map[string]any); ok {
+			delete(sockopt, "dialerProxy")
+			if len(sockopt) == 0 {
+				delete(stream, "sockopt")
+			}
+		}
+	}
+	profile.outbound = outbound
+	profile.chain = nil
+	return profile, true, nil
 }
 
 // measureThroughInstance proves that traffic passes and returns the latency
@@ -184,7 +197,7 @@ func realPingProfiles(parent context.Context, profiles []Profile, fragmentation 
 
 // realPingFinalists bounds how many servers Auto checks for real before it
 // connects, so connecting stays fast with large subscriptions.
-const realPingFinalists = 6
+const realPingFinalists = 4
 
 // verifiedPingProfiles is what Auto and balancers choose from: a quick TCP
 // ping of every server, then a real check of the fastest ones. Servers that

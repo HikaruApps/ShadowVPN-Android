@@ -111,3 +111,43 @@ func TestRealPingTellsWorkingFromMerelyReachable(t *testing.T) {
 		t.Fatalf("Auto must be available through the working server: %+v", withAuto[0])
 	}
 }
+
+// Servers from Xray JSON usually chain through a fragmenting freedom hop.
+// They must be checked like any other server: in parallel, without the
+// process-wide dialer state (which serialized them and made Auto slow).
+func TestRealPingChainedServerRunsInParallel(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	previous := realPingURLs
+	realPingURLs = []string{target.URL + "/generate_204"}
+	defer func() { realPingURLs = previous }()
+
+	port := startShadowsocksServer(t, "correct-password")
+	raw := fmt.Sprintf(`{"remarks":"Chained","outbounds":[
+	  {"tag":"proxy","protocol":"shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":%d,"method":"chacha20-ietf-poly1305","password":"correct-password"}]},
+	   "streamSettings":{"sockopt":{"dialerProxy":"fragment"}}},
+	  {"tag":"fragment","protocol":"freedom","settings":{"fragment":{"packets":"1-3","length":"10-20","interval":"1-2"}}}]}`, port)
+	profile := mustProfile(t, raw)
+	if len(profile.chain) == 0 {
+		t.Fatal("the test needs a chained profile")
+	}
+
+	// Another probe holds the shared lock meanwhile: a chained check that
+	// wanted it exclusively would hang here.
+	xrayDialerMu.RLock()
+	defer xrayDialerMu.RUnlock()
+	done := make(chan []PingResult, 1)
+	go func() { done <- realPingProfiles(context.Background(), []Profile{profile, profile, profile}, false) }()
+	select {
+	case results := <-done:
+		for _, result := range results {
+			if !result.Available {
+				t.Fatalf("chained server must pass: %+v", results)
+			}
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("chained checks waited for an exclusive lock")
+	}
+}
