@@ -64,13 +64,16 @@ Three layers, all in one process:
    - Exported gomobile API in `bridge.go`: `SetDataDir`, `SetDeviceSeed`, `DeviceHWID`,
      `LoadCachedProfiles`, `Configure(optionsJSON)`, `ImportSources({"urls","manual"})`,
      `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `StartProxy` (local proxy only, no TUN), `Stop`, `SwitchProfile(profileID)`,
-     `Reload`, `PublicIP`, `Logs`, `LastWarning` (non-fatal note of the last Prepare, e.g. dropped
+     `Reload`, `PublicIP`, `Logs`, `Diagnose(id)` (DNS + real-check step results with human reasons, `diagnose.go`), `LastWarning` (non-fatal note of the last Prepare, e.g. dropped
      geo rules); `android_ping.go`: `PingPlan` + `PingProfile(id, method)` let Java check servers
      one by one and stream each latency to the UI (`window.ShadowVPN.pingResult`). Java also re-checks
      2 s after the default network changes, keeps the last results for 24 h (`ping_cache`, shown
      dimmed as `cached`) and re-checks one server on a tap on its latency (`pingServer`, a second
      attempt from the 3rd second). Inner-class bridge methods must call activity methods as
-     `MainActivity.this.x(...)`: a bare `x(...)` with the same name calls the bridge itself. Data
+     `MainActivity.this.x(...)`: a bare `x(...)` with the same name calls the bridge itself. Subscriptions
+     from outside (`shadowvpn://import/<https url>` deep link, clipboard on focus, QR via
+     zxing-android-embedded) always go through `window.ShadowVPN.offerSubscription` for the user
+     to confirm; nothing is added silently. Data
      crosses the boundary as JSON strings; global state lives in the mutex-guarded `mobile`
      struct. Only types gomobile supports may appear in exported signatures.
    - `session.go` keeps the TUN fd across Xray instances: a new instance starts without its
@@ -87,7 +90,8 @@ Three layers, all in one process:
      `realping.go` (server check through the server's own outbound with chains/fragmentation,
      two HTTPS requests; `verifiedPingProfiles` = TCP for all, real check of the fastest, used by
      Auto and balancers), `xray_dialer.go` (Xray's process-wide dialer state: every `core.New`
-     claims it, so probes hand it back to the running VPN and chain probes/switches serialize),
+     claims it, so probes hand it back to the running VPN and switches serialize; probes drop a
+     chained freedom hop and use built-in fragmentation, so they never need that state),
      `cache.go` (profile cache,
      GeoData download with codes recorded in `meta.json`).
    - `subscription.go` (share links), `dns.go`, `bootstrap.go`, `auto.go`, `ping.go`,

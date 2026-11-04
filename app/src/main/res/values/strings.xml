@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_connect">Подключить</string>
+    <string name="shortcut_connect_long">Подключить VPN</string>
+    <string name="shortcut_disconnect">Отключить</string>
+    <string name="shortcut_disconnect_long">Отключить VPN</string>
+    <string name="shortcut_servers">Сменить сервер</string>
+    <string name="shortcut_servers_long">Выбрать другой сервер</string>
+    <string name="widget_description">Статус VPN и кнопка подключения</string>
+</resources>

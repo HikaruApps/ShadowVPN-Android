@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id);
   const hasNativeBridge = !!window.ShadowVpnAndroid;
   const native = window.ShadowVpnAndroid || {
-    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {},
+    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {}, scanQr() {}, runDiagnostics() {},
     saveSubscriptions() {}, saveSettings() {}, getLogs() { return ""; }, copyText() {}, openVpnSettings() {},
     getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}, resetProxyCredentials() {}
   };
@@ -414,11 +414,14 @@
     if (card) {
       updateServerCard(card, server);
       popLatency(cardParts.get(card)?.latency);
+      // A fresh answer, not one restored from the last run.
+      if (!item.cached) popFlag(card);
     }
     if (snapshot.selectedId === item.id) {
       const ping = latencyText(server);
       setText("dockPing", ping.text);
       $("dockPing").className = `latency ${ping.cls}`;
+      updatePingPill(true);
     }
     // Sorting by latency reorders the list; "order" moves the cards without
     // rebuilding them.
@@ -435,33 +438,42 @@
       { duration: 450, easing: "cubic-bezier(.34,1.56,.64,1)" });
   }
 
-  // The connect button glows with the live traffic, like Hiddify's corona:
-  // the light follows a rise quickly (about 0.8 s) and fades slowly (about
-  // 2.5 s), on a log scale so a page load and a download both show.
-  let glowLevel = 0;
-  let glowTimer = 0;
-  function trafficLevel() {
-    const rate = (Number(snapshot.traffic?.downloadRate) || 0) + (Number(snapshot.traffic?.uploadRate) || 0);
-    // 0 at idle, 1 at about 10 MB/s.
-    return Math.min(1, Math.log10(1 + rate / 1024) / 4);
-  }
-  function updateGlow(connected) {
-    const power = $("powerButton");
-    if (!connected || noMotion()) {
-      clearInterval(glowTimer); glowTimer = 0; glowLevel = 0;
-      power.style.removeProperty("--glow");
-      return;
+  // The selected server's latency under the connect button, as in Hiddify;
+  // a tap checks that server again (Auto and balancers re-check the list).
+  function updatePingPill(fresh = false) {
+    const pill = $("pingPill");
+    const selected = snapshot.selectedId ? serverModels.get(snapshot.selectedId) || snapshot.selected : null;
+    pill.hidden = !selected;
+    if (!selected) return;
+    const ping = latencyText(selected);
+    const text = ping.text || "Проверить";
+    const value = $("pingPillValue");
+    if (value.textContent !== text) {
+      value.textContent = text;
+      if (fresh && ping.cls !== "pending") popLatency(value);
     }
-    const step = () => {
-      const target = trafficLevel();
-      // Rise at once (CSS smooths it); decay with a 2.5 s time constant.
-      glowLevel = target >= glowLevel ? target : target + (glowLevel - target) * Math.exp(-0.5 / 2.5);
-      const value = glowLevel < 0.01 ? "0" : glowLevel.toFixed(2);
-      if (power.style.getPropertyValue("--glow") !== value) power.style.setProperty("--glow", value);
-    };
-    step();
-    // Snapshots stop when nothing changes; the fade must not stop with them.
-    if (!glowTimer) glowTimer = setInterval(step, 500);
+    pill.className = `ping-pill ${ping.cls}`;
+  }
+
+  // The flag springs in with a ring spreading from it when the server's
+  // latency arrives (Hiddify's flag arrival): scale .4→1 with an overshoot,
+  // the ring 1→1.7 fading out. Web Animations only, no reflow.
+  function popFlag(card) {
+    const flagNode = cardParts.get(card)?.flag;
+    if (!flagNode || noMotion() || typeof flagNode.animate !== "function") return;
+    flagNode.animate([{ transform: "scale(.4)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }],
+      { duration: 500, easing: "cubic-bezier(.34,1.56,.64,1)" });
+    let ring = card.querySelector(".flag-ring");
+    if (!ring) {
+      ring = el("i", "flag-ring");
+      card.append(ring);
+    }
+    ring.style.left = `${flagNode.offsetLeft}px`;
+    ring.style.top = `${flagNode.offsetTop}px`;
+    ring.style.width = `${flagNode.offsetWidth}px`;
+    ring.style.height = `${flagNode.offsetHeight}px`;
+    ring.animate([{ transform: "scale(1)", opacity: .7 }, { transform: "scale(1.7)", opacity: 0 }],
+      { duration: 700, easing: "ease-out", fill: "forwards" });
   }
 
   /** A new check starts: every host waits for its own answer again. */
@@ -508,7 +520,15 @@
       ? `${total} ${plural(total, ["сервер", "сервера", "серверов"])}`
       : `${visible.length} из ${total}`);
     if (!visible.length) {
-      serverList.append(el("div", "empty-list", snapshot.importRunning ? "Загружаем серверы…" : "Нет серверов"));
+      if (snapshot.importRunning) {
+        // Shimmering skeleton cards while the subscription loads (Hiddify).
+        for (let i = 0; i < 6; i++) {
+          const card = el("div", "skeleton-card");
+          card.append(el("i", "skeleton flag"), el("span", "skeleton-lines"));
+          card.lastChild.append(el("i", "skeleton line"), el("i", "skeleton line short"));
+          serverList.append(card);
+        }
+      } else serverList.append(el("div", "empty-list", "Нет серверов"));
       serverPager = null;
       return;
     }
@@ -609,10 +629,11 @@
     power.disabled = connecting || !snapshot.selected || !!snapshot.switchingTo;
     power.setAttribute("aria-label", connected || state === "blocked" ? "Отключить VPN" : "Подключить VPN");
     renderStatus(connected, connecting);
-    updateGlow(connected);
 
     setText("ipLabel", connected ? "Защищённый IP" : "IP");
     setText("ipValue", snapshot.publicIp || (connecting || state === "blocked" ? "—" : "Определяем…"));
+    // Still waiting for the address: shimmer instead of a static word.
+    $("ipValue").classList.toggle("shimmer-text", !snapshot.publicIp && !connecting && state !== "blocked");
     setText("sessionTime", snapshot.session || "00:00:00");
     $("sessionTime").hidden = !connected;
     $("detailsDivider").hidden = !connected;
@@ -638,6 +659,7 @@
     const ping = selected ? latencyText(selected) : { text: "", cls: "" };
     setText("dockPing", ping.text);
     $("dockPing").className = `latency ${ping.cls}`;
+    updatePingPill();
     $("pingButton").classList.toggle("running", !!snapshot.pingRunning);
     $("pingButton").disabled = !!snapshot.pingRunning;
     $("refreshButton").disabled = !!snapshot.importRunning;
@@ -879,6 +901,7 @@
       if (name === "settings") buildSettings();
       if (name === "subscriptions") buildSubscriptions();
       if (name === "logs") buildLogs();
+      if (name === "diagnostics") buildDiagnostics();
     });
   }
 
@@ -1296,6 +1319,78 @@
     body.append(routingSettingsContent());
   }
 
+  // What a rule matches, in words.
+  function describeRule(rule) {
+    const [prefix, rest] = rule.includes(":") ? [rule.slice(0, rule.indexOf(":")).toLowerCase(), rule.slice(rule.indexOf(":") + 1)] : ["", rule];
+    const known = { "category-ru": "Российские сайты", "category-ads-all": "Реклама", youtube: "YouTube", google: "Google",
+      telegram: "Telegram", openai: "ChatGPT", netflix: "Netflix", instagram: "Instagram", twitter: "X (Twitter)", private: "Локальные сети" };
+    if (prefix === "geosite") return { title: known[rest.toLowerCase()] || rest, hint: `Список сайтов · ${rule}` };
+    if (prefix === "geoip") return { title: rest.toLowerCase() === "ru" ? "Российские IP" : known[rest.toLowerCase()] || rest.toUpperCase(), hint: `Список IP-адресов · ${rule}` };
+    if (prefix === "full") return { title: rest, hint: "Только этот адрес" };
+    if (prefix === "keyword") return { title: rest, hint: "Адреса со словом" };
+    if (prefix === "regexp") return { title: rest, hint: "Регулярное выражение" };
+    if (/^[\d.:a-f]+\/\d+$/i.test(rule) || /^\d+\.\d+\.\d+\.\d+$/.test(rule)) return { title: rule, hint: "IP-адрес" };
+    return { title: rule, hint: "Сайт и его поддомены" };
+  }
+
+  function ruleListEditor(text) {
+    let items = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const node = el("div", "rule-editor");
+    const list = el("div", "rule-list");
+    const input = el("input", "field");
+    input.placeholder = "example.com, geosite:youtube…";
+    input.spellcheck = false; input.autocapitalize = "off"; input.autocomplete = "off";
+    const addButton = button("Добавить", "secondary", () => add(input.value), true);
+    const entry = el("div", "rule-entry");
+    entry.append(input, addButton);
+    const paste = el("textarea", "field mono");
+    paste.placeholder = "Вставьте список: по одному на строку";
+    paste.hidden = true;
+    const pasteButton = button("Вставить списком", "ghost", () => {
+      if (paste.hidden) { paste.hidden = false; paste.focus(); pasteButton.textContent = "Добавить из списка"; return; }
+      add(paste.value.split(/[\r\n,]+/));
+      paste.value = ""; paste.hidden = true; pasteButton.textContent = "Вставить списком";
+    }, true);
+    const copyButton = button("Скопировать все", "ghost", () => {
+      native.copyText(items.join("\n"));
+      showToast(items.length ? "Правила скопированы" : "Список пуст");
+    }, true);
+    const tools = el("div", "rule-tools");
+    tools.append(pasteButton, copyButton);
+    const render = () => {
+      list.replaceChildren();
+      if (!items.length) {
+        list.append(el("p", "rule-empty", "Пока пусто. Добавьте сайт, например youtube.com"));
+        return;
+      }
+      items.forEach((rule, index) => {
+        const info = describeRule(rule);
+        const item = el("div", "rule-item");
+        const copy = el("span", "row-copy");
+        copy.append(el("b", null, info.title), el("small", null, info.hint));
+        const remove = el("button", "rule-remove");
+        remove.type = "button";
+        remove.setAttribute("aria-label", `Удалить ${rule}`);
+        remove.textContent = "×";
+        remove.addEventListener("click", () => { items.splice(index, 1); render(); });
+        item.append(copy, remove);
+        list.append(item);
+      });
+    };
+    function add(values) {
+      const next = (Array.isArray(values) ? values : [values])
+        .map(value => String(value).trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, ""))
+        .filter(Boolean);
+      next.forEach(value => { if (!items.includes(value)) items.push(value); });
+      input.value = "";
+      render();
+    }
+    input.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); add(input.value); } });
+    node.append(el("b", "rule-title", "Сайты и списки"), list, entry, paste, tools);
+    render();
+    return { node, add, value: () => items.join("\n") };
+  }
+
   function routingSettingsContent() {
     const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
@@ -1310,16 +1405,13 @@
     modeRow.querySelector(".row-copy").append(modeDetail);
     mode.addEventListener("change", () => { modeDetail.textContent = modeHint[mode.value] || ""; });
 
-    const rules = el("textarea", "field");
-    rules.placeholder = "example.com\ngeosite:youtube\ngeoip:ru";
-    rules.value = s.routingRules || "";
-    rules.spellcheck = false;
-    const rulesRow = row("Правила", "По одному на строку: домен, full:, keyword:, regexp:, geosite: или geoip:", rules);
-    rulesRow.classList.add("stack");
+    // Sites as a list (as in Amnezia): add, remove, paste many, copy all.
+    // Stored exactly as before, one rule per line.
+    const rules = ruleListEditor(s.routingRules || "");
+    const rulesRow = el("div", "row stack rules-row");
+    rulesRow.append(rules.node);
     const preset = button("Российские сайты напрямую", "secondary", () => {
-      const lines = rules.value.split(/\n/).map(line => line.trim()).filter(Boolean);
-      ["geosite:category-ru", "geoip:ru"].forEach(item => { if (!lines.includes(item)) lines.push(item); });
-      rules.value = lines.join("\n");
+      rules.add(["geosite:category-ru", "geoip:ru"]);
       if (mode.value === "full") { mode.value = "bypass"; mode.dispatchEvent(new Event("change")); }
     });
     rulesRow.append(preset);
@@ -1349,7 +1441,7 @@
       group("Источники списков", geoIPRow, geoSiteRow),
       el("p", "group-note", "Списки скачиваются при первом подключении с такими правилами и обновляются раз в неделю. Оставьте поля пустыми, чтобы использовать источники по умолчанию."),
       saveActions(() => ({
-        routingMode: mode.value, routingRules: rules.value, subscriptionRules: isOn(subscriptionRules),
+        routingMode: mode.value, routingRules: rules.value(), subscriptionRules: isOn(subscriptionRules),
         routeOnly: isOn(routeOnly), blockUdp: isOn(blockUdp),
         geoipUrl: geoIP.value.trim(), geositeUrl: geoSite.value.trim()
       })));
@@ -1635,6 +1727,7 @@
     const manualRow = row("Свои конфигурации", "Xray JSON или ссылки vless, vmess, trojan, ss, hy2, naive", manual);
     manualRow.classList.add("stack");
     body.append(group("Вручную", manualRow));
+    body.append(actions(button("Сканировать QR-код", "secondary", () => native.scanQr())));
     body.append(actions(
       button("Сохранить и обновить", "primary", () => {
         const working = { wifi: wifi.input.value.trim(), lte: lte.input.value.trim(), manual: manual.value.trim() };
@@ -1651,13 +1744,107 @@
       })));
   }
 
+  // Connection check, step by step (Hiddify's connection health sheet).
+  let diagnosticsRows = null;
+  const DIAGNOSTIC_STEPS = [
+    ["network", "Сеть телефона", "Есть ли интернет без VPN"],
+    ["dns", "Адрес сервера", "Находится ли сервер по имени"],
+    ["server", "Сервер", "Проходит ли трафик через сервер"],
+    ["vpn", "Интернет через VPN", "Работает ли подключённый туннель"]
+  ];
+
+  function buildDiagnostics() {
+    const body = page("Диагностика", null);
+    const list = el("div", "list diagnostics");
+    diagnosticsRows = new Map();
+    DIAGNOSTIC_STEPS.forEach(([id, title, hint], index) => {
+      const node = row(title, hint);
+      node.classList.add("diag-row");
+      node.style.animationDelay = `${index * 60}ms`;
+      const mark = el("i", "diag-mark");
+      node.prepend(mark);
+      diagnosticsRows.set(id, { node, mark, detail: node.querySelector("small") });
+      list.append(node);
+    });
+    const selected = snapshot.selectedId ? serverModels.get(snapshot.selectedId) || snapshot.selected : null;
+    body.append(
+      el("p", "group-note", selected ? `Проверяем «${selected.name}» и путь до него.` : "Сервер не выбран: проверим только сеть."),
+      list,
+      actions(button("Проверить снова", "secondary", startDiagnostics)));
+    startDiagnostics();
+  }
+
+  function startDiagnostics() {
+    if (!diagnosticsRows) return;
+    DIAGNOSTIC_STEPS.forEach(([id, , hint]) => diagnosticsStep({ id, state: "wait", detail: hint }));
+    native.runDiagnostics();
+  }
+
+  function diagnosticsStep(step) {
+    const item = diagnosticsRows?.get(step?.id);
+    if (!item) return;
+    item.node.dataset.state = step.state;
+    if (step.detail) item.detail.textContent = step.detail;
+    else if (step.state === "running") item.detail.textContent = "Проверяем…";
+  }
+
   function buildLogs(fromSettings = false) {
     const body = page("Логи", fromSettings ? () => buildSettings() : null);
     const log = el("pre", "log-box", native.getLogs() || "Событий пока нет");
     body.append(log, actions(button("Копировать", "secondary", () => native.copyText(log.textContent))));
   }
 
+  // ---------- A subscription from a link, the clipboard or a QR code ----------
+  // Android hands it over; nothing is added until the user picks a slot.
+  let offerNode = null;
+
+  function closeOffer() {
+    if (!offerNode) return false;
+    const node = offerNode;
+    offerNode = null;
+    node.classList.remove("open");
+    setTimeout(() => node.remove(), 200);
+    return true;
+  }
+
+  function offerSubscription(offer) {
+    if (!offer || !offer.url) return;
+    closeOffer();
+    let host = offer.url;
+    try { host = new URL(offer.url).host; } catch (_) {}
+    const sourceText = { link: "Ссылка из браузера", clipboard: "Скопировано в буфер обмена", qr: "Из QR-кода" }[offer.source] || "";
+    const slots = snapshot.subscriptions || { wifi: "", lte: "", manual: "" };
+    const save = slot => {
+      const working = { wifi: slots.wifi || "", lte: slots.lte || "", manual: slots.manual || "", [slot]: offer.url };
+      if (working.wifi && working.wifi === working.lte) working.lte = "";
+      snapshot.subscriptions = working;
+      native.saveSubscriptions(JSON.stringify(working));
+      closeOffer();
+    };
+    const choices = [];
+    if (!slots.wifi) choices.push(button("Добавить", "primary", () => save("wifi")));
+    else {
+      choices.push(button("Заменить подписку Wi-Fi", slots.lte ? "secondary" : "secondary", () => save("wifi")));
+      choices.push(button(slots.lte ? "Заменить мобильную" : "Добавить для мобильной сети", slots.lte ? "secondary" : "primary", () => save("lte")));
+    }
+    choices.push(button("Отмена", "ghost", closeOffer));
+    const scrim = el("div", "offer-scrim");
+    const card = el("div", "offer-card");
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-label", "Добавить подписку");
+    const url = el("small", "mono offer-url", offer.url);
+    card.append(el("span", "offer-source", sourceText), el("h3", null, "Добавить подписку?"), el("b", "offer-host", host), url,
+      el("p", "offer-note", slots.wifi ? "Подписка Wi-Fi уже есть. Новая может её заменить или работать в мобильной сети." : "Серверы из неё загрузятся сразу."),
+      actions(...choices));
+    scrim.append(card);
+    scrim.addEventListener("click", event => { if (event.target === scrim) closeOffer(); });
+    document.body.append(scrim);
+    offerNode = scrim;
+    afterFirstPaint(() => scrim.classList.add("open"));
+  }
+
   function closeTopLayer() {
+    if (closeOffer()) return true;
     if ($("appMenu").classList.contains("open")) { closeMenu(); return true; }
     if (!panelOverlay.hidden && panelBackAction) { panelBackAction(); return true; }
     if (closePanel()) return true;
@@ -1671,6 +1858,18 @@
   document.addEventListener("visibilitychange", () => { if (document.hidden) flushSettings(true); });
 
   $("powerButton").addEventListener("click", () => native.toggleVpn());
+  $("welcomeScan").addEventListener("click", () => native.scanQr());
+  $("pingPill").addEventListener("click", () => {
+    const id = snapshot.selectedId;
+    const server = id ? serverModels.get(id) : null;
+    if (!server || snapshot.pingRunning || server.checking) return;
+    if (server.auto || server.members) { native.pingServers(); return; }
+    server.checking = true;
+    updatePingPill();
+    const card = serverCards.get(id);
+    if (card) updateServerCard(card, server);
+    native.pingServer(id);
+  });
   $("menuButton").addEventListener("click", event => { event.stopPropagation(); setMenu(!$("appMenu").classList.contains("open")); });
   document.addEventListener("click", event => {
     if (!event.target.closest(".app-menu,#menuButton")) closeMenu();
@@ -1738,6 +1937,10 @@
     pingResult(item) { applyPingResult(item); },
     // The selection changed: mark the card without rebuilding the list.
     selectedServer(id) { applySelectedServer(id); },
+    offerSubscription(offer) { offerSubscription(offer); },
+    // Launcher shortcut "Сменить сервер".
+    openServers() { closePanel(); openServers(); },
+    diagnosticsStep(step) { diagnosticsStep(step); },
     installedApps(payload) { if (splitAppsReceiver) splitAppsReceiver(payload); },
     appIcon(packageName, source) {
       panelBody.querySelectorAll(".app-icon").forEach(slot => {
@@ -1774,9 +1977,15 @@
   if (preview === "servers") { openServers(); renderServers(true); }
   if (preview === "menu") setMenu(true);
   if (preview === "welcome") render({ needsSubscription:true });
-  if (["settings", "subscriptions", "logs"].includes(preview)) {
+  if (["settings", "subscriptions", "logs", "diagnostics"].includes(preview)) {
     openPanel(preview);
-    ({ settings:buildSettings, subscriptions:buildSubscriptions, logs:buildLogs })[preview]();
+    ({ settings:buildSettings, subscriptions:buildSubscriptions, logs:buildLogs, diagnostics:buildDiagnostics })[preview]();
+    if (preview === "diagnostics") {
+      diagnosticsStep({ id:"network", state:"ok", detail:"Wi-Fi · интернет есть" });
+      diagnosticsStep({ id:"dns", state:"ok", detail:"de.example.com → 203.0.113.10" });
+      diagnosticsStep({ id:"server", state:"fail", detail:"Сервер не пропускает трафик: сервер обрывает соединение. Обычно это неверный ключ или истёкшая подписка" });
+      diagnosticsStep({ id:"vpn", state:"skip", detail:"VPN не подключён: подключитесь и запустите проверку снова" });
+    }
   }
   if (["providers", "ping", "network", "connection", "tunnel", "proxy", "routing", "split", "application", "about", "auto"].includes(preview)) {
     openPanel("settings");

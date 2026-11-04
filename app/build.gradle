@@ -13,8 +13,8 @@ android {
         applicationId = 'net.shadownet.shadowvpn.android'
         minSdk = 29
         targetSdk = 35
-        versionCode = 25
-        versionName = '0.22.0' + (buildSha ? '-' + buildSha.take(7) : '')
+        versionCode = 27
+        versionName = '0.23.0' + (buildSha ? '-' + buildSha.take(7) : '')
     }
     if (signingKeystore) {
         signingConfigs {
@@ -47,4 +47,8 @@ android {
     }
 }
 
-dependencies { implementation files('libs/shadowvpn-core.aar') }
+dependencies {
+    implementation files('libs/shadowvpn-core.aar')
+    // QR scanner without Google Play services; depends only on zxing core.
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+}

@@ -3,6 +3,7 @@ package net.shadownet.shadowvpn.android;
 import android.Manifest;
 import android.app.Activity;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -16,6 +17,7 @@ import android.graphics.Insets;
 import android.graphics.drawable.Drawable;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.TrafficStats;
 import android.net.Uri;
 import android.net.VpnService;
@@ -75,6 +77,7 @@ public final class MainActivity extends Activity {
     // A ping can take minutes, so it gets its own thread and never delays an
     // import or the public IP lookup.
     private final ExecutorService pingRunner = Executors.newSingleThreadExecutor();
+    private final ExecutorService diagnosticsRunner = Executors.newSingleThreadExecutor();
     private String switchingTo = "";
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final List<ServerItem> servers = new ArrayList<>();
@@ -128,7 +131,11 @@ public final class MainActivity extends Activity {
     private ConnectivityManager.NetworkCallback networkWatcher;
     private Network watchedNetwork;
     private final Runnable networkRecheck = () -> {
-        if (!pingRunning && !pingResults.isEmpty()) runPings();
+        // Not while a connection is being set up: the check would compete
+        // with it for the network.
+        if (pingRunning || pingResults.isEmpty()
+                || "Подключение…".equals(ShadowVpnService.status)) return;
+        runPings();
     };
 
     private final Runnable statusUpdater = new Runnable() {
@@ -154,6 +161,178 @@ public final class MainActivity extends Activity {
         getWindow().setNavigationBarColor(UI_BACKGROUND);
         setupWebView();
         appWorker.execute(() -> installedAppsCache = installedAppsJson().toString());
+        handleIntent(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntent(intent);
+    }
+
+    // ---------- Subscriptions from outside: link, clipboard, QR ----------
+    // Nothing from outside is added silently: any web page can open a link,
+    // so the user always confirms in the app first.
+
+    private String pendingOffer = "";
+    private String pendingScript = "";
+    private static final int VPN_SHORTCUT_REQUEST = 103;
+
+    private void runPendingScript() {
+        if (pendingScript.isEmpty() || !webReady || webView == null) return;
+        webView.evaluateJavascript(pendingScript, null);
+        pendingScript = "";
+    }
+
+    private void handleIntent(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        if (VpnControl.ACTION_DISCONNECT.equals(action)) {
+            if (VpnControl.isActive()) VpnControl.disconnect(this);
+            return;
+        }
+        if (VpnControl.ACTION_CONNECT.equals(action)) {
+            if (VpnControl.isActive()) return;
+            if (preferences.getString("selected_id", "").isEmpty()) {
+                showMessage("Сначала выберите сервер");
+                return;
+            }
+            // Servers may not be loaded yet; the service reads the saved
+            // server itself, so only the VPN permission is needed here.
+            Intent permission = CoreConfig.proxyOnly(preferences) ? null : VpnService.prepare(this);
+            if (permission != null) startActivityForResult(permission, VPN_SHORTCUT_REQUEST);
+            else VpnControl.connect(this);
+            return;
+        }
+        if (VpnControl.ACTION_SERVERS.equals(action)) {
+            pendingScript = "window.ShadowVPN&&window.ShadowVPN.openServers()";
+            runPendingScript();
+            return;
+        }
+        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) {
+            String url = subscriptionFromLink(intent.getDataString());
+            if (!url.isEmpty()) offerSubscription(url, "link");
+            else showMessage("Ссылка не содержит HTTPS-подписку");
+        }
+    }
+
+    /**
+     * shadowvpn://import/https://host/path#Name, the same form as Hiddify's
+     * hiddify://import/...; the URL may also be percent-encoded or passed as
+     * shadowvpn://import?url=....
+     */
+    static String subscriptionFromLink(String link) {
+        if (link == null) return "";
+        Uri uri = Uri.parse(link);
+        if (!"shadowvpn".equalsIgnoreCase(uri.getScheme())
+                || !"import".equalsIgnoreCase(uri.getHost())) return "";
+        String value = uri.getQueryParameter("url");
+        if (value == null || value.isEmpty()) {
+            int start = link.toLowerCase(Locale.ROOT).indexOf("import/");
+            value = start < 0 ? "" : link.substring(start + "import/".length());
+            int hash = value.indexOf('#');
+            if (hash >= 0) value = value.substring(0, hash);
+            if (value.regionMatches(true, 0, "https%3A", 0, 8)) value = Uri.decode(value);
+        }
+        return isHttpsLink(value) ? value.trim() : "";
+    }
+
+    static boolean isHttpsLink(String value) {
+        if (value == null) return false;
+        value = value.trim();
+        if (value.isEmpty() || value.contains(" ") || value.contains("\n")) return false;
+        Uri uri = Uri.parse(value);
+        return "https".equalsIgnoreCase(uri.getScheme()) && uri.getHost() != null
+                && !uri.getHost().isEmpty();
+    }
+
+    private void offerSubscription(String url, String source) {
+        String wifi = preferences.getString("subscription_wifi", "");
+        String lte = preferences.getString("subscription_lte", "");
+        if (url.equals(wifi) || url.equals(lte)) {
+            if (!"clipboard".equals(source)) showMessage("Эта подписка уже добавлена");
+            return;
+        }
+        pendingOffer = "";
+        try {
+            JSONObject offer = new JSONObject().put("url", url).put("source", source);
+            if (!webReady || webView == null) {
+                pendingOffer = offer.toString();
+                return;
+            }
+            webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.offerSubscription("
+                    + offer + ")", null);
+        } catch (Exception ignored) { }
+    }
+
+    private void deliverPendingOffer() {
+        if (pendingOffer.isEmpty() || !webReady || webView == null) return;
+        webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.offerSubscription("
+                + pendingOffer + ")", null);
+        pendingOffer = "";
+    }
+
+    /** The widget and the tile show the server's name without the app running. */
+    private void rememberSelectedName() {
+        ServerItem selected = findSelected();
+        preferences.edit().putString("selected_name",
+                selected == null ? "" : flagAndName(selected.name).name).apply();
+        VpnControl.refreshSurfaces(this);
+    }
+
+    private void showMessage(String message) {
+        uiMessage = message;
+        pushSnapshot();
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // Android lets only the focused app read the clipboard.
+        if (hasFocus) checkClipboard();
+    }
+
+    /**
+     * Offers a subscription link the user just copied. The description is read
+     * first: it does not count as reading the clipboard, so Android's "pasted"
+     * notice appears only once per new clip, and only for text.
+     */
+    private void checkClipboard() {
+        try {
+            ClipboardManager manager = getSystemService(ClipboardManager.class);
+            if (manager == null) return;
+            ClipDescription description = manager.getPrimaryClipDescription();
+            if (description == null || !description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) return;
+            long stamp = description.getTimestamp();
+            if (stamp <= preferences.getLong("clipboard_checked_at", 0)) return;
+            preferences.edit().putLong("clipboard_checked_at", stamp).apply();
+            ClipData clip = manager.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) return;
+            CharSequence text = clip.getItemAt(0).getText();
+            String value = text == null ? "" : text.toString().trim();
+            String url = value.startsWith("shadowvpn://") ? subscriptionFromLink(value) : value;
+            if (isHttpsLink(url)) offerSubscription(url, "clipboard");
+        } catch (RuntimeException ignored) { }
+    }
+
+    private static final int QR_REQUEST = com.google.zxing.integration.android.IntentIntegrator.REQUEST_CODE;
+
+    private void scanQr() {
+        new com.google.zxing.integration.android.IntentIntegrator(this)
+                .setDesiredBarcodeFormats(com.google.zxing.integration.android.IntentIntegrator.QR_CODE)
+                .setPrompt("Наведите камеру на QR-код подписки")
+                .setBeepEnabled(false)
+                .setOrientationLocked(true)
+                .initiateScan();
+    }
+
+    private void handleQrResult(int resultCode, Intent data) {
+        com.google.zxing.integration.android.IntentResult result =
+                com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(resultCode, data);
+        if (result == null || result.getContents() == null) return;
+        String value = result.getContents().trim();
+        String url = value.startsWith("shadowvpn://") ? subscriptionFromLink(value) : value;
+        if (isHttpsLink(url)) offerSubscription(url, "qr");
+        else showMessage("В QR-коде нет HTTPS-ссылки на подписку");
     }
 
     private void setupWebView() {
@@ -185,6 +364,8 @@ public final class MainActivity extends Activity {
                 // A reloaded page lost the latencies; they are not part of the snapshot.
                 requeuePingResults();
                 loadCachedServers();
+                deliverPendingOffer();
+                runPendingScript();
             }
         });
         setContentView(createInsetRoot(webView));
@@ -232,6 +413,12 @@ public final class MainActivity extends Activity {
         if (manager == null || networkWatcher != null) return;
         networkWatcher = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) {
+                // Our own VPN coming up is not a new network to measure from.
+                try {
+                    NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
+                    if (capabilities != null
+                            && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return;
+                } catch (RuntimeException ignored) { }
                 ui.post(() -> {
                     Network previous = watchedNetwork;
                     watchedNetwork = network;
@@ -265,6 +452,7 @@ public final class MainActivity extends Activity {
         appWorker.shutdownNow();
         switchWorker.shutdownNow();
         pingRunner.shutdownNow();
+        diagnosticsRunner.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("ShadowVpnAndroid");
             webView.destroy();
@@ -370,6 +558,9 @@ public final class MainActivity extends Activity {
             preferences.edit().putString("selected_id", selectedId).apply();
             selectionChanged = true;
         }
+        // Also after an update renamed the server, and for installs from
+        // before the name was kept.
+        rememberSelectedName();
         if (selectionChanged) notifySelectedServer(selectedId);
         pushSnapshot();
     }
@@ -708,6 +899,76 @@ public final class MainActivity extends Activity {
         schedulePingFlush();
     }
 
+    // ---------- Connection check: network, DNS, server, internet via VPN ----------
+
+    private void runDiagnostics() {
+        String profileId = selectedId;
+        diagnosticsRunner.execute(() -> {
+            diagnosticStep("network", "running", "");
+            String[] network = networkState();
+            diagnosticStep("network", network[0], network[1]);
+            if (!"ok".equals(network[0])) {
+                diagnosticStep("dns", "skip", "Пропущено: нет сети");
+                diagnosticStep("server", "skip", "Пропущено: нет сети");
+                diagnosticStep("vpn", "skip", "Пропущено: нет сети");
+                return;
+            }
+            diagnosticStep("dns", "running", "");
+            diagnosticStep("server", "running", "");
+            try {
+                JSONObject result = new JSONObject(Bridge.diagnose(profileId));
+                JSONObject dns = result.getJSONObject("dns");
+                JSONObject server = result.getJSONObject("server");
+                diagnosticStep("dns", dns.optBoolean("ok") ? "ok" : "fail", dns.optString("detail"));
+                diagnosticStep("server", server.optBoolean("ok") ? "ok"
+                        : dns.optBoolean("ok") ? "fail" : "skip", server.optString("detail"));
+            } catch (Exception error) {
+                diagnosticStep("dns", "fail", cleanError(error));
+                diagnosticStep("server", "skip", "Пропущено");
+            }
+            if (!ShadowVpnService.connected) {
+                diagnosticStep("vpn", "skip", "VPN не подключён: подключитесь и запустите проверку снова");
+                return;
+            }
+            diagnosticStep("vpn", "running", "");
+            try {
+                diagnosticStep("vpn", "ok", "Интернет через VPN работает · IP " + maskIp(Bridge.publicIP()));
+            } catch (Exception error) {
+                diagnosticStep("vpn", "fail", "Через туннель нет интернета: " + cleanError(error));
+            }
+        });
+    }
+
+    /** {state, detail} of the phone's own network, outside the VPN. */
+    private String[] networkState() {
+        ConnectivityManager manager = getSystemService(ConnectivityManager.class);
+        try {
+            Network network = manager == null ? null : manager.getActiveNetwork();
+            NetworkCapabilities caps = network == null ? null : manager.getNetworkCapabilities(network);
+            if (caps == null) return new String[]{"fail", "Телефон не подключён к сети"};
+            String kind = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "Wi-Fi"
+                    : caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "Мобильная сеть"
+                    : caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ? "Ethernet" : "Сеть";
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                return new String[]{"fail", kind + " без доступа в интернет: Android не смог выйти в сеть"};
+            }
+            return new String[]{"ok", kind + " · интернет есть"};
+        } catch (RuntimeException error) {
+            return new String[]{"fail", "Не удалось проверить сеть"};
+        }
+    }
+
+    private void diagnosticStep(String id, String state, String detail) {
+        ui.post(() -> {
+            if (!webReady || webView == null) return;
+            try {
+                JSONObject step = new JSONObject().put("id", id).put("state", state).put("detail", detail);
+                webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.diagnosticsStep("
+                        + step + ")", null);
+            } catch (Exception ignored) { }
+        });
+    }
+
     private void finishPings() {
         pingRunning = false;
         savePingCache();
@@ -823,6 +1084,8 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request == VPN_REQUEST && result == RESULT_OK) startSelectedServer();
+        if (request == QR_REQUEST) handleQrResult(result, data);
+        if (request == VPN_SHORTCUT_REQUEST && result == RESULT_OK) VpnControl.connect(this);
     }
 
     private void startSelectedServer() {
@@ -1200,6 +1463,7 @@ public final class MainActivity extends Activity {
                 if (result == null) {
                     selectedId = target.id;
                     preferences.edit().putString("selected_id", target.id).apply();
+                    rememberSelectedName();
                     uiMessage = "Сервер переключён";
                     ShadowVpnService.addLog("Сервер переключён без разрыва VPN");
                     notifySelectedServer(target.id);
@@ -1431,6 +1695,7 @@ public final class MainActivity extends Activity {
                         }
                         selectedId = id;
                         preferences.edit().putString("selected_id", id).apply();
+                        rememberSelectedName();
                         uiMessage = "";
                         notifySelectedServer(id);
                         pushSnapshot();
@@ -1444,6 +1709,8 @@ public final class MainActivity extends Activity {
             ui.post(() -> importSubscriptions(true));
         }
 
+        @JavascriptInterface public void scanQr() { ui.post(MainActivity.this::scanQr); }
+        @JavascriptInterface public void runDiagnostics() { ui.post(MainActivity.this::runDiagnostics); }
         @JavascriptInterface public void pingServers() { ui.post(MainActivity.this::runPings); }
         // Qualified, or the call would resolve to this bridge method itself.
         @JavascriptInterface public void pingServer(String id) {

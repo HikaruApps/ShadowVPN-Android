@@ -82,33 +82,43 @@ img{display:block}
 .quota small{display:block;margin-top:8px;color:var(--text-3);font-size:11px}
 
 .stage-center{grid-row:2;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px}
-.power{--ring-color:transparent;position:relative;width:clamp(136px,40vw,168px);aspect-ratio:1;display:grid;place-items:center;border:1px solid var(--border-strong);border-radius:50%;background:var(--surface);color:var(--text-3);transition:transform 110ms var(--ease-out),border-color 160ms var(--ease-out),color 160ms var(--ease-out)}
-/* Кольцо живёт на отдельном слое: его появление идёт через opacity и
-   transform, без перерисовки самого круга. */
-.power::before{content:"";position:absolute;inset:0;border-radius:50%;box-shadow:0 0 0 8px var(--ring-color);opacity:0;transform:scale(.9);pointer-events:none;transition:opacity 170ms var(--ease-out),transform 220ms var(--ease-spring);will-change:transform,opacity;backface-visibility:hidden;-webkit-backface-visibility:hidden}
-.power svg{width:44%;height:44%;stroke-width:1.6}
-/* Traffic glow (connected): a soft halo behind the button whose strength is
-   --glow (0..1) from the live speed. Only opacity and transform change. */
-.power::after{content:"";position:absolute;inset:-22%;z-index:-1;border-radius:50%;background:radial-gradient(circle,rgba(63,185,80,.32) 0%,rgba(63,185,80,.12) 45%,transparent 70%);opacity:calc(var(--glow,0) * .9);transform:scale(calc(.82 + var(--glow,0) * .26));transition:opacity 800ms var(--ease-out),transform 800ms var(--ease-out);pointer-events:none;will-change:opacity,transform}
-.power:active:not(:disabled){transform:scale(.97)}
-.power:disabled{opacity:1}
-.app[data-state="connected"] .power{--ring-color:var(--success-soft);border-color:var(--success);color:var(--text)}
-.app[data-state="connected"] .power::before{opacity:1;transform:scale(1)}
-.app[data-state="connecting"] .power{color:var(--text-2)}
-.app[data-state="connecting"] .power svg{animation:pulse 1.5s ease-in-out infinite}
-.app[data-state="error"] .power{border-color:var(--danger)}
 /* Мягкое «дыхание»: без резкого мигания и без лишней перерисовки. */
 @keyframes pulse{50%{opacity:.5}}
+
+/* ---------- Connect button ----------
+   A white disc with the fox and a light arc around it: fast while
+   connecting, slow and quieter once connected. Only transform and opacity
+   animate. */
+.power{position:relative;width:clamp(136px,40vw,168px);aspect-ratio:1;display:grid;place-items:center;border:0;border-radius:50%;background:#f5f5f5;box-shadow:0 10px 30px rgba(0,0,0,.45);transition:transform 110ms var(--ease-out),opacity 200ms var(--ease-out)}
+.power:active:not(:disabled){transform:scale(.96)}
+.power:disabled{opacity:.55}
+.app[data-state="connecting"] .power:disabled{opacity:1}
+.power-logo{width:48%;height:auto;filter:brightness(0);opacity:.88;transition:transform 300ms var(--ease-spring),opacity 200ms var(--ease-out);pointer-events:none}
+/* Progress arc while connecting. */
+.power::before{content:"";position:absolute;inset:-9px;border-radius:50%;background:conic-gradient(from 0deg,transparent 0 62%,rgba(245,245,245,.15) 70%,#f5f5f5 100%);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 3px),#000 calc(100% - 2.5px));mask:radial-gradient(farthest-side,transparent calc(100% - 3px),#000 calc(100% - 2.5px));opacity:0;transition:opacity 200ms var(--ease-out);pointer-events:none}
+.app[data-state="connecting"] .power::before{opacity:1;animation:spin 1.1s linear infinite}
+.app[data-state="connected"] .power::before{opacity:.75;animation:spin 3.2s linear infinite}
+.app[data-state="connecting"] .power-logo{animation:pulse 1.5s ease-in-out infinite}
+.app[data-state="connected"] .power-logo{opacity:1;transform:scale(1.04)}
+/* Errors and the Kill Switch block keep the disc white with a red ring. */
+.app[data-state="error"] .power,.app[data-state="blocked"] .power{outline:3px solid var(--danger);outline-offset:0}
 
 .status{max-width:320px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center}
 .status h1{font-size:20px;font-weight:600;letter-spacing:-.02em}
 .status p{max-width:100%;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--text-2);font-size:13px}
 .status p span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ping-pill{display:inline-flex;align-items:center;gap:6px;height:28px;margin-top:6px;padding:0 12px;border:1px solid var(--border);border-radius:14px;color:var(--text-2);font-size:12px;font-variant-numeric:tabular-nums;transition:transform var(--micro-ms) var(--ease-out),border-color 160ms var(--ease-out)}
+.ping-pill:active{transform:scale(.96)}
+.ping-pill svg{width:14px;height:14px;stroke-width:2}
+.ping-pill span{display:inline-block}
+.ping-pill.good{color:var(--success)}
+.ping-pill.medium{color:var(--warning)}
+.ping-pill.bad{color:var(--danger)}
+.ping-pill.pending svg{animation:pulse 900ms ease-in-out infinite}
+.ping-pill.cached{opacity:.6}
 .status .server-flag{width:18px;height:18px;flex:0 0 18px}
 .app[data-state="error"] .status h1{color:var(--danger)}
 .app[data-state="error"] .status p{display:block}
-.app[data-state="blocked"] .power{--ring-color:var(--danger-soft);border-color:var(--danger);color:var(--text)}
-.app[data-state="blocked"] .power::before{opacity:1;transform:scale(1)}
 .app[data-state="blocked"] .status h1{color:var(--danger)}
 .app[data-state="blocked"] .status p{display:block}
 
@@ -196,6 +206,8 @@ button,label,select,input,textarea{touch-action:manipulation}
 .server-list{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior:contain;padding:0 var(--gutter) var(--gutter)}
 .server-card{width:100%;min-height:60px;display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid transparent;border-radius:var(--radius);text-align:left;content-visibility:auto;contain-intrinsic-size:auto 62px;flex:0 0 auto;transition:background-color var(--tap-ms) var(--ease-soft),border-color var(--tap-ms) var(--ease-soft)}
 .server-card + .server-card{margin-top:2px}
+.server-card{position:relative}
+.flag-ring{position:absolute;border:2px solid rgba(255,255,255,.7);border-radius:50%;opacity:0;pointer-events:none}
 .server-card:active{background:var(--surface)}
 .server-card.selected{border-color:var(--border-strong);background:var(--surface)}
 /* The cards are placed with "order"; the pager sentinel must stay last. */
@@ -327,11 +339,66 @@ textarea.field[rows="2"]{height:68px}
 .toast{position:fixed;z-index:150;left:50%;bottom:104px;max-width:calc(100% - 32px);padding:10px 14px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface-2);font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.4);transform:translate(-50%,10px) scale(.97);opacity:0;pointer-events:none;transition:opacity 160ms var(--ease-in),transform 160ms var(--ease-in);will-change:transform,opacity}
 .toast.visible{opacity:1;transform:translate(-50%,0) scale(1);transition-duration:220ms;transition-timing-function:var(--ease-out)}
 
+/* ---------- Loading shimmer (Hiddify) ----------
+   One soft highlight sweeps across placeholders; on low-end devices they
+   stay still. */
+.skeleton{display:block;border-radius:6px;background:linear-gradient(100deg,var(--surface-2) 30%,var(--surface-3) 50%,var(--surface-2) 70%);background-size:300% 100%;animation:shimmer 1.3s ease-in-out infinite}
+@keyframes shimmer{from{background-position:100% 0}to{background-position:0 0}}
+.skeleton-card{display:flex;align-items:center;gap:12px;min-height:60px;padding:10px 12px;flex:0 0 auto}
+.skeleton.flag{width:36px;height:36px;flex:0 0 36px;border-radius:50%}
+.skeleton-lines{flex:1;display:flex;flex-direction:column;gap:8px}
+.skeleton.line{height:12px;width:62%}
+.skeleton.line.short{width:38%;height:10px}
+.skeleton-card:nth-child(2n) .skeleton.line{width:48%}
+.latency.pending{color:transparent;border-radius:6px;min-height:14px;background:linear-gradient(100deg,var(--surface-2) 30%,var(--surface-3) 50%,var(--surface-2) 70%);background-size:300% 100%;animation:shimmer 1.3s ease-in-out infinite}
+.ping-pill.pending span{color:var(--text-3)}
+.shimmer-text{background:linear-gradient(100deg,var(--text-3) 30%,var(--text) 50%,var(--text-3) 70%);background-size:300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent!important;animation:shimmer 1.6s ease-in-out infinite}
+
+/* ---------- Rule list ---------- */
+.rule-editor{display:flex;flex-direction:column;gap:10px}
+.rule-title{font-size:15px;font-weight:500}
+.rule-list{border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden}
+.rule-item{display:flex;align-items:center;gap:8px;min-height:48px;padding:6px 6px 6px 12px}
+.rule-item + .rule-item{border-top:1px solid var(--border)}
+.rule-item .row-copy b{font-size:14px;font-weight:500;overflow-wrap:anywhere}
+.rule-remove{flex:0 0 36px;width:36px;height:36px;border-radius:50%;color:var(--text-3);font-size:20px;line-height:1}
+.rule-remove:active{background:var(--surface-2);color:var(--danger)}
+.rule-empty{padding:14px 12px;color:var(--text-3);font-size:13px}
+.rule-entry{display:flex;gap:8px}
+.rule-entry .field{flex:1;min-width:0}
+.rule-entry .button{width:auto;padding:0 14px}
+.rule-tools{display:flex;gap:8px}
+.rule-tools .button{flex:1}
+
+/* ---------- Diagnostics ---------- */
+.diag-row{animation:rise 220ms var(--ease-out) both}
+.diag-mark{position:relative;flex:0 0 22px;width:22px;height:22px;border:2px solid var(--border-strong);border-radius:50%}
+.diag-row[data-state="running"] .diag-mark{border-top-color:var(--text-2);animation:spin 800ms linear infinite}
+.diag-row[data-state="ok"] .diag-mark{border-color:var(--success);background:var(--success)}
+.diag-row[data-state="ok"] .diag-mark::after{content:"";position:absolute;left:6px;top:2px;width:5px;height:10px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)}
+.diag-row[data-state="fail"] .diag-mark{border-color:var(--danger);background:var(--danger)}
+.diag-row[data-state="fail"] .diag-mark::after{content:"!";position:absolute;inset:0;display:grid;place-items:center;color:var(--bg);font-size:13px;font-weight:700;line-height:18px;text-align:center}
+.diag-row[data-state="skip"]{opacity:.55}
+.diag-row[data-state="fail"] small{color:var(--danger)}
+
+/* ---------- Subscription offer ---------- */
+.offer-scrim{position:fixed;z-index:140;inset:0;display:flex;align-items:flex-end;justify-content:center;padding:var(--gutter);background:rgba(0,0,0,.6);opacity:0;transition:opacity 180ms var(--ease-in)}
+.offer-scrim.open{opacity:1;transition-duration:240ms;transition-timing-function:var(--ease-out)}
+.offer-card{width:100%;max-width:480px;padding:20px 16px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-lg);background:var(--surface);transform:translate3d(0,16px,0);transition:transform 240ms var(--ease-out)}
+.offer-scrim.open .offer-card{transform:none}
+.offer-source{display:block;color:var(--text-3);font-size:12px}
+.offer-card h3{margin-top:4px;font-size:18px;font-weight:600;letter-spacing:-.01em}
+.offer-host{display:block;margin-top:12px;font-size:15px;font-weight:500;overflow-wrap:anywhere}
+.offer-url{display:block;margin-top:4px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.offer-note{margin-top:12px;color:var(--text-2);font-size:13px;line-height:1.45}
+.offer-card .actions{margin-top:12px}
+.button.ghost{color:var(--text-2)}
+.welcome .button.secondary{margin-top:8px}
+
 /* ---------- Adaptation ---------- */
 @media (max-height:640px){
   .stage{gap:12px;padding-bottom:12px}
   .stage-center{gap:16px}
-  .power{width:clamp(112px,34vw,136px)}
   .stat{padding:10px 12px}
   .stat b{font-size:15px}
 }
@@ -349,8 +416,9 @@ textarea.field[rows="2"]{height:68px}
    responsive instead of frozen. */
 .lite *,.lite *::before,.lite *::after{box-shadow:none!important;animation:none!important}
 .lite .loading i{animation:spin 800ms linear infinite!important}
-.lite .power::after{display:none}
-.lite .power svg,.lite .ip-pill .dot,.lite #pingButton.running svg{animation:pulse 1.5s ease-in-out infinite!important}
+.lite .app[data-state="connecting"] .power::before{animation:spin 1.1s linear infinite!important}
+.lite .app[data-state="connected"] .power::before{animation:spin 3.2s linear infinite!important}
+.lite .power-logo,.lite .ip-pill .dot,.lite #pingButton.running svg{animation:pulse 1.5s ease-in-out infinite!important}
 .lite .icon-button,.lite .server-picker,.lite .button,.lite .row,.lite .server-card,.lite .switch::before,.lite .switch::after,.lite .quota-track i,.lite .sheet-header,.lite .chips,.lite .panel-header,.lite .chips button,.lite .chip-indicator,.lite .popover button{transition:none!important}
 .lite{--sheet-open-ms:200ms;--sheet-close-ms:160ms;--scrim-open-ms:180ms;--scrim-close-ms:140ms}
 /* Still pictures (the browser preview) show the final state right away. */
