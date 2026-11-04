@@ -33,7 +33,7 @@ final class UpdateNotifier {
         manager.notify(ID, new Notification.Builder(context, CHANNEL)
                 .setContentTitle(error == null ? "Подписка обновлена" : "Подписка не обновилась")
                 .setContentText(error == null ? summary(before, after) : error)
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setSmallIcon(R.drawable.ic_stat_shadowvpn)
                 .setContentIntent(open)
                 .setAutoCancel(true)
                 .build());

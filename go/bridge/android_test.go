@@ -481,12 +481,60 @@ func TestMissingGeoCodeInUserRuleIsReported(t *testing.T) {
 		map[string]any{"domain": []any{"geosite:nope"}, "outboundTag": "direct"},
 	}
 	info := geoDataInfo{Codes: map[string]map[string]bool{"geosite.dat": {"YOUTUBE": true}}}
-	if _, err := dropMissingGeoCodes(rules, map[int]bool{1: true}, info); err == nil {
-		t.Fatal("unknown user geosite must be reported")
+	// "Only listed via VPN": the rule is what goes through the VPN, so a
+	// missing list must stop the connection instead of leaking those sites.
+	if _, _, err := dropMissingGeoCodes(rules, map[int]bool{1: true}, info, false); err == nil {
+		t.Fatal("unknown user geosite must be reported in strict mode")
 	}
-	kept, err := dropMissingGeoCodes(rules, map[int]bool{}, info)
-	if err != nil || len(kept) != 1 {
-		t.Fatalf("unknown subscription geosite must be dropped: %v %v", kept, err)
+	// Elsewhere the rule is skipped, which only sends more through the VPN.
+	kept, missing, err := dropMissingGeoCodes(cloneRules(rules), map[int]bool{1: true}, info, true)
+	if err != nil || len(kept) != 1 || missing != "geosite:nope" {
+		t.Fatalf("unknown user geosite must be skipped with a note: %v %q %v", kept, missing, err)
+	}
+	kept, missing, err = dropMissingGeoCodes(cloneRules(rules), map[int]bool{}, info, false)
+	if err != nil || len(kept) != 1 || missing != "" {
+		t.Fatalf("unknown subscription geosite must be dropped quietly: %v %q %v", kept, missing, err)
+	}
+}
+
+func cloneRules(rules []any) []any {
+	result := make([]any, len(rules))
+	for i, raw := range rules {
+		clone := map[string]any{}
+		for key, value := range raw.(map[string]any) {
+			clone[key] = value
+		}
+		result[i] = clone
+	}
+	return result
+}
+
+// Only the missing code goes; a valid one in the same subscription stays,
+// and proxy_only with lost user rules refuses to connect.
+func TestGeoDataLeniencyByRoutingMode(t *testing.T) {
+	failing := func(bool, bool) (geoDataInfo, error) { return geoDataInfo{}, errors.New("offline") }
+	single := mustProfile(t, "trojan://p@198.51.100.7:443?security=tls#T")
+	for _, test := range []struct {
+		mode string
+		ok   bool
+	}{{"bypass", true}, {"proxy_only", false}} {
+		routing, err := newRoutingOptions(test.mode, []string{"geosite:youtube", "example.com"}, defaultGeoIPURL, defaultGeoSiteURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config, _ := makeConfigWithRoutingAndDoH(single, "cloudflare", nil, "", false, "", routing)
+		encoded, err := androidRuntimeConfig(config, androidRuntimeOptions{DNS: dnsPresets["cloudflare"], RoutingMode: test.mode, GeoData: failing})
+		if (err == nil) != test.ok {
+			t.Fatalf("%s: unexpected result %v", test.mode, err)
+		}
+		if test.ok {
+			if strings.Contains(string(encoded), "geosite:") || !strings.Contains(string(encoded), "example.com") {
+				t.Fatalf("%s: geo value must go, plain domain must stay: %s", test.mode, encoded)
+			}
+			if _, err := core.LoadConfig("json", bytes.NewReader(encoded)); err != nil {
+				t.Fatalf("%s: Xray rejected the config: %v", test.mode, err)
+			}
+		}
 	}
 }
 
@@ -586,12 +634,68 @@ func TestSubscriptionGeoRulesDoNotBlockConnecting(t *testing.T) {
 		t.Fatalf("Xray rejected the config: %v", err)
 	}
 
-	// The user's own geo rule, however, needs the lists.
+	// The user's own geo rules are stripped as well, so the connection can proceed.
 	routing, _ := newRoutingOptions("bypass", []string{"geosite:youtube"}, defaultGeoIPURL, defaultGeoSiteURL)
 	single := mustProfile(t, "trojan://p@198.51.100.7:443?security=tls#T")
 	config, _ := makeConfigWithRoutingAndDoH(single, "cloudflare", nil, "", false, "", routing)
-	if _, err := androidRuntimeConfig(config, androidRuntimeOptions{DNS: dnsPresets["cloudflare"], RoutingMode: "bypass", GeoData: failing}); err == nil {
-		t.Fatal("user geo rules without GeoData must fail")
+	encoded, err = androidRuntimeConfig(config, androidRuntimeOptions{DNS: dnsPresets["cloudflare"], RoutingMode: "bypass", GeoData: failing})
+	if err != nil {
+		t.Fatalf("user geo rules without GeoData must not block connecting: %v", err)
+	}
+	if strings.Contains(string(encoded), "geosite:") {
+		t.Fatalf("user geo values must be dropped: %s", encoded)
+	}
+	if _, err := core.LoadConfig("json", bytes.NewReader(encoded)); err != nil {
+		t.Fatalf("Xray rejected the config without GeoData: %v", err)
+	}
+}
+
+func TestPingPlanJSONShape(t *testing.T) {
+	member := Profile{ID: "000000000000000000000011", Name: "Germany", Protocol: "vless"}
+	russian := Profile{ID: "000000000000000000000012", Name: "RU Moscow", Protocol: "trojan"}
+	group := Profile{
+		ID: "000000000000000000000010", Name: "Balancer", Protocol: "balancer", Members: 1,
+		members: []Profile{member},
+	}
+	regular := Profile{ID: "000000000000000000000013", Name: "Netherlands", Protocol: "vmess"}
+
+	mobile.Lock()
+	previous := mobile.profiles
+	mobile.profiles = []Profile{group, russian, regular}
+	mobile.Unlock()
+	defer func() { mobile.Lock(); mobile.profiles = previous; mobile.Unlock() }()
+
+	encoded, err := PingPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(encoded), &object); err != nil {
+		t.Fatalf("invalid ping plan JSON: %v", err)
+	}
+	for _, key := range []string{"servers", "groups", "autoId", "autoNoRUId"} {
+		if _, exists := object[key]; !exists {
+			t.Fatalf("ping plan is missing %q: %s", key, encoded)
+		}
+	}
+	var plan pingPlanData
+	if err := json.Unmarshal([]byte(encoded), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.AutoID != autoProfileID || plan.AutoNoRUID != autoNoRUProfileID {
+		t.Fatalf("unexpected Auto IDs: %s", encoded)
+	}
+	if len(plan.Servers) != 3 || len(plan.Groups) != 1 || len(plan.Groups[0].Members) != 1 {
+		t.Fatalf("unexpected ping plan contents: %s", encoded)
+	}
+	russianFound := false
+	for _, server := range plan.Servers {
+		if server.ID == russian.ID {
+			russianFound = server.Russian
+		}
+	}
+	if !russianFound {
+		t.Fatalf("Russian profile was not marked: %s", encoded)
 	}
 }
 

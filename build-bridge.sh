@@ -4,10 +4,16 @@ cd "$(dirname "$0")"
 repo_root="$(pwd)"
 out="$(mktemp -d)"
 mobile_version="v0.0.0-20260908204917-8b95e45f8d3e"
-ndk_version="28.0.13004108"
+ndk_version="${NDK_VERSION:-28.0.13004108}"
+# Fall back to any installed NDK so the bridge still builds on machines that
+# only have a different revision.
 if [[ -z "${ANDROID_HOME:-}" || ! -d "$ANDROID_HOME/ndk/$ndk_version" ]]; then
-  echo "Android NDK $ndk_version was not found under ANDROID_HOME" >&2
-  exit 1
+  ndk_version="$(ls -1 "$ANDROID_HOME/ndk" 2>/dev/null | sort -V | tail -n 1 || true)"
+  if [[ -z "$ndk_version" ]]; then
+    echo "No Android NDK found under \$ANDROID_HOME/ndk" >&2
+    exit 1
+  fi
+  echo "Using Android NDK $ndk_version" >&2
 fi
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ndk_version"
 trap 'rm -rf "$out"' EXIT

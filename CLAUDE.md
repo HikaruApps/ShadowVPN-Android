@@ -64,7 +64,9 @@ Three layers, all in one process:
    - Exported gomobile API in `bridge.go`: `SetDataDir`, `SetDeviceSeed`, `DeviceHWID`,
      `LoadCachedProfiles`, `Configure(optionsJSON)`, `ImportSources({"urls","manual"})`,
      `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `StartProxy` (local proxy only, no TUN), `Stop`, `SwitchProfile(profileID)`,
-     `Reload`, `PublicIP`, `Logs`. Data
+     `Reload`, `PublicIP`, `Logs`, `LastWarning` (non-fatal note of the last Prepare, e.g. dropped
+     geo rules); `android_ping.go`: `PingPlan` + `PingProfile(id, method)` let Java check servers
+     one by one and stream each latency to the UI (`window.ShadowVPN.pingResult`). Data
      crosses the boundary as JSON strings; global state lives in the mutex-guarded `mobile`
      struct. Only types gomobile supports may appear in exported signatures.
    - `session.go` keeps the TUN fd across Xray instances: a new instance starts without its
