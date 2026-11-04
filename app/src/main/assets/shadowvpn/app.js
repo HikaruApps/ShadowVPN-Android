@@ -407,7 +407,10 @@
     server.available = item.available;
     cardsDirty = true;
     const card = serverCards.get(item.id);
-    if (card) updateServerCard(card, server);
+    if (card) {
+      updateServerCard(card, server);
+      popLatency(cardParts.get(card)?.latency);
+    }
     if (snapshot.selectedId === item.id) {
       const ping = latencyText(server);
       setText("dockPing", ping.text);
@@ -416,6 +419,16 @@
     // Sorting by latency reorders the list; "order" moves the cards without
     // rebuilding them.
     if (sortMode === "latency") updateMountedCards();
+  }
+
+  // A fresh latency pops in (as in Hiddify): scale from half size with a
+  // small overshoot. Web Animations run on the compositor and need no
+  // reflow, so dozens of answers at once stay cheap.
+  function popLatency(node) {
+    if (!node || noMotion() || typeof node.animate !== "function") return;
+    node.animate(
+      [{ transform: "scale(.5)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }],
+      { duration: 450, easing: "cubic-bezier(.34,1.56,.64,1)" });
   }
 
   /** A new check starts: every host waits for its own answer again. */

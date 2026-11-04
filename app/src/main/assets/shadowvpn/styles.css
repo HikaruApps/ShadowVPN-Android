@@ -227,6 +227,15 @@ button,label,select,input,textarea{touch-action:manipulation}
 .page.page-out{animation:pageOut 140ms var(--ease-in) forwards}
 .page.page-out.back{animation-name:pageOutBack}
 @keyframes pageIn{from{opacity:0;transform:translateX(10px)}}
+/* Short settings pages build up in a quick stagger (60 ms per block, as in
+   Hiddify); long lists start at once from the sixth block on. */
+.page.page-in > *{animation:rise 220ms var(--ease-out) both}
+.page.page-in > :nth-child(2){animation-delay:60ms}
+.page.page-in > :nth-child(3){animation-delay:120ms}
+.page.page-in > :nth-child(4){animation-delay:180ms}
+.page.page-in > :nth-child(5){animation-delay:240ms}
+.page.page-in > :nth-child(n+6){animation-delay:300ms}
+@keyframes rise{from{opacity:0;transform:translate3d(0,8px,0)}}
 @keyframes pageOut{to{opacity:0;transform:translateX(-10px)}}
 @keyframes pageInBack{from{opacity:0;transform:translateX(-10px)}}
 @keyframes pageOutBack{to{opacity:0;transform:translateX(10px)}}
