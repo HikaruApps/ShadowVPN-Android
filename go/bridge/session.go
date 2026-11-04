@@ -33,6 +33,10 @@ func currentSessionInputs() sessionInputs {
 	}
 }
 
+// geoDataConnectWait is how long a connection waits for a GeoData list that
+// is not on the phone yet.
+var geoDataConnectWait = 12 * time.Second
+
 // buildSession resolves the chosen profile and returns its Android runtime
 // config, plus the Cronet runtime when the profile is Naive.
 func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, error) {
@@ -63,7 +67,14 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 		SubscriptionRules: options.SubscriptionRules,
 		LogPath:           xrayLogPath(in.dataDir),
 		GeoData: func(needIP, needSite bool) (geoDataInfo, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			// Only "only listed via VPN" cannot connect without the lists;
+			// elsewhere a list still loading is skipped for this connection
+			// and keeps downloading for the next one.
+			wait := geoDataConnectWait
+			if routing.Mode == "proxy_only" {
+				wait = 90 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), wait)
 			defer cancel()
 			return ensureGeoData(ctx, in.dataDir, needIP, needSite, geoIP, geoSite)
 		},

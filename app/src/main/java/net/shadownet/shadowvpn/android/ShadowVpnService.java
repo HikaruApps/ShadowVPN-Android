@@ -9,6 +9,7 @@ import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.VpnService;
+import android.os.SystemClock;
 import android.os.ParcelFileDescriptor;
 
 import net.shadownet.shadowvpn.core.bridge.Bridge;
@@ -99,7 +100,10 @@ public final class ShadowVpnService extends VpnService {
             // phone directly while the server is being prepared.
             if (killSwitch) establishTunnel(preferences);
             addLog("Подготовка " + (profileId.startsWith(AUTO_PREFIX) ? "Auto" : "профиля " + profileId));
+            long phase = SystemClock.elapsedRealtime();
             Bridge.prepare(profileId);
+            addLog("Сервер подготовлен за " + seconds(phase));
+            phase = SystemClock.elapsedRealtime();
             try {
                 String lastWarning = Bridge.lastWarning();
                 if (lastWarning != null && !lastWarning.trim().isEmpty()) {
@@ -117,7 +121,8 @@ public final class ShadowVpnService extends VpnService {
             blocked = false;
             retryAttempt = 0;
             status = "Подключено";
-            addLog(proxyOnly ? "Xray запущен как локальный прокси, без VPN" : "Xray запущен");
+            addLog((proxyOnly ? "Xray запущен как локальный прокси, без VPN" : "Xray запущен")
+                    + " за " + seconds(phase));
             updateNotification(proxyOnly ? "Прокси 127.0.0.1:"
                     + CoreConfig.port(preferences, "proxy_socks_port", 10808) : "VPN подключён");
             watchNetwork();
@@ -385,6 +390,10 @@ public final class ShadowVpnService extends VpnService {
         if (updateStatus) status = "Отключено";
         if (updateStatus) addLog("VPN отключён");
         if (updateStatus) VpnControl.refreshSurfaces(this);
+    }
+
+    private static String seconds(long since) {
+        return String.format(java.util.Locale.ROOT, "%.1f с", (SystemClock.elapsedRealtime() - since) / 1000.0);
     }
 
     static synchronized void addLog(String value) {
