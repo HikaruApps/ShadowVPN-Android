@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,10 +15,12 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xtls/xray-core/core"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 const remnawaveStyleJSON = `[{
@@ -954,4 +957,113 @@ func TestAndroidDNSFallsBackFromDoH(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = instance.Close()
+}
+
+// geoSiteBytes builds a minimal GeoSite list with one code and one domain.
+func geoSiteBytes(code string) []byte {
+	var domain []byte
+	domain = protowire.AppendTag(domain, 2, protowire.BytesType)
+	domain = protowire.AppendBytes(domain, []byte("example.com"))
+	var entry []byte
+	entry = protowire.AppendTag(entry, 1, protowire.BytesType)
+	entry = protowire.AppendBytes(entry, []byte(code))
+	entry = protowire.AppendTag(entry, 2, protowire.BytesType)
+	entry = protowire.AppendBytes(entry, domain)
+	var list []byte
+	list = protowire.AppendTag(list, 1, protowire.BytesType)
+	return protowire.AppendBytes(list, entry)
+}
+
+// A slow GeoData source must not hold up connecting: a missing list is waited
+// for only as long as the caller allows and keeps downloading afterwards, a
+// stale one is refreshed in the background, and a failed source is not
+// retried on every connection.
+func TestGeoDataSlowSourceDoesNotHoldConnect(t *testing.T) {
+	defer waitGeoDownloads(t)
+	release := make(chan struct{})
+	requests := make(chan struct{}, 8)
+	var brokenRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/broken.dat" {
+			brokenRequests.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		requests <- struct{}{}
+		<-release
+		_, _ = w.Write(geoSiteBytes("TEST"))
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	url := server.URL + "/geosite.dat"
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	started := time.Now()
+	_, err := ensureGeoData(ctx, directory, false, true, "", url)
+	cancel()
+	if err == nil || time.Since(started) > 2*time.Second {
+		t.Fatalf("a missing list must be waited for only as long as ctx allows: %v after %v", err, time.Since(started))
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		result, err := ensureGeoData(t.Context(), directory, false, true, "", url)
+		if err == nil && result.has("geosite.dat", "test") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the download did not finish in the background: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if count := len(requests); count != 1 {
+		t.Fatalf("the waiting connection and the next one must share one download, got %d requests", count)
+	}
+
+	// Stale copy: used at once, refreshed in the background.
+	geo := filepath.Join(directory, "geodata")
+	meta := readGeoMeta(geo)
+	entry := meta["geosite.dat"]
+	entry.Updated = time.Now().Add(-30 * 24 * time.Hour)
+	recordGeoData(geo, "geosite.dat", entry)
+	blocked := make(chan struct{})
+	release = blocked
+	started = time.Now()
+	if result, err := ensureGeoData(t.Context(), directory, false, true, "", url); err != nil || !result.has("geosite.dat", "test") {
+		t.Fatalf("a stale list must be used while it refreshes: %v", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatalf("a stale list must not wait for its refresh, took %v", time.Since(started))
+	}
+	close(blocked)
+	waitGeoDownloads(t)
+
+	// A failed source is not asked again on the next connection.
+	broken := server.URL + "/broken.dat"
+	for range 2 {
+		if _, err := ensureGeoData(t.Context(), directory, true, false, broken, ""); err == nil {
+			t.Fatal("a broken source must fail")
+		}
+	}
+	if count := brokenRequests.Load(); count != 1 {
+		t.Fatalf("a failed source must not be retried at once, got %d requests", count)
+	}
+}
+
+// waitGeoDownloads waits for background GeoData downloads, which would
+// otherwise write into a test's directory after it is removed.
+func waitGeoDownloads(t *testing.T) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		geoDownloads.Lock()
+		active := len(geoDownloads.active)
+		geoDownloads.Unlock()
+		if active == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("GeoData downloads did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
@@ -244,10 +245,105 @@ func downloadGeoData(ctx context.Context, client *http.Client, asset geoDataAsse
 	return codes, nil
 }
 
-// ensureGeoData downloads the GeoIP/GeoSite files that routing rules need
-// into <data>/geodata. Files are parsed once, on download, and their codes
+// GeoData downloads run on their own, not on the caller's context: a list
+// that takes longer than a connection is willing to wait still lands on disk
+// for the next one. One download per file runs at a time, and a failed one
+// is not retried for a while, so a slow or blocked source does not hold up
+// every connection.
+const (
+	geoDownloadTimeout = 5 * time.Minute
+	geoRetryAfter      = 5 * time.Minute
+)
+
+type geoDownload struct {
+	done  chan struct{}
+	entry geoDataEntry
+	err   error
+}
+
+var geoDownloads = struct {
+	sync.Mutex
+	active map[string]*geoDownload
+	failed map[string]time.Time
+	meta   sync.Mutex // guards meta.json read-modify-write
+}{active: map[string]*geoDownload{}, failed: map[string]time.Time{}}
+
+var geoDataClient = &http.Client{
+	// No overall timeout: an 18 MB list on a slow line may take minutes, and
+	// geoDownloadTimeout bounds it instead.
+	CheckRedirect: func(request *http.Request, via []*http.Request) error {
+		if len(via) >= 4 {
+			return errors.New("слишком много перенаправлений")
+		}
+		_, err := normalizeGeoDataURL(request.URL.String(), "GeoData")
+		return err
+	},
+}
+
+// startGeoDownload downloads asset into directory in the background, or
+// joins the download of that file already running. It returns nil when the
+// last attempt failed less than geoRetryAfter ago.
+func startGeoDownload(directory string, asset geoDataAsset) *geoDownload {
+	path := filepath.Join(directory, asset.Filename)
+	geoDownloads.Lock()
+	defer geoDownloads.Unlock()
+	if download := geoDownloads.active[path]; download != nil {
+		return download
+	}
+	if failed, ok := geoDownloads.failed[path]; ok && time.Since(failed) < geoRetryAfter {
+		return nil
+	}
+	download := &geoDownload{done: make(chan struct{})}
+	geoDownloads.active[path] = download
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), geoDownloadTimeout)
+		codes, err := downloadGeoData(ctx, geoDataClient, asset, path)
+		cancel()
+		if err == nil {
+			if stat, statErr := os.Stat(path); statErr == nil {
+				download.entry = geoDataEntry{URL: asset.URL, Size: stat.Size(), Updated: time.Now(), Codes: codes}
+				recordGeoData(directory, asset.Filename, download.entry)
+			} else {
+				err = statErr
+			}
+		}
+		download.err = err
+		geoDownloads.Lock()
+		delete(geoDownloads.active, path)
+		if err != nil {
+			geoDownloads.failed[path] = time.Now()
+		} else {
+			delete(geoDownloads.failed, path)
+		}
+		geoDownloads.Unlock()
+		close(download.done)
+	}()
+	return download
+}
+
+func readGeoMeta(directory string) map[string]geoDataEntry {
+	meta := map[string]geoDataEntry{}
+	if data, err := os.ReadFile(filepath.Join(directory, "meta.json")); err == nil {
+		_ = json.Unmarshal(data, &meta)
+	}
+	return meta
+}
+
+func recordGeoData(directory, filename string, entry geoDataEntry) {
+	geoDownloads.meta.Lock()
+	defer geoDownloads.meta.Unlock()
+	meta := readGeoMeta(directory)
+	meta[filename] = entry
+	data, _ := json.Marshal(meta)
+	_ = writeFileAtomic(filepath.Join(directory, "meta.json"), data)
+}
+
+// ensureGeoData prepares the GeoIP/GeoSite files that routing rules need in
+// <data>/geodata. Files are parsed once, on download, and their codes
 // recorded; connecting afterwards only compares sizes. A file older than a
-// week is refreshed, keeping the old copy if the refresh fails.
+// week is refreshed in the background while the current copy is used. A
+// missing file is waited for only as long as ctx allows; the download goes
+// on afterwards for the next connection.
 func ensureGeoData(ctx context.Context, dataDir string, needIP, needSite bool, geoIPURL, geoSiteURL string) (geoDataInfo, error) {
 	info := geoDataInfo{Codes: map[string]map[string]bool{}}
 	if dataDir == "" {
@@ -257,11 +353,9 @@ func ensureGeoData(ctx context.Context, dataDir string, needIP, needSite bool, g
 	if err := os.MkdirAll(info.Directory, 0o700); err != nil {
 		return info, errors.New("Не удалось создать каталог GeoData")
 	}
-	metaPath := filepath.Join(info.Directory, "meta.json")
-	meta := map[string]geoDataEntry{}
-	if data, err := os.ReadFile(metaPath); err == nil {
-		_ = json.Unmarshal(data, &meta)
-	}
+	geoDownloads.meta.Lock()
+	meta := readGeoMeta(info.Directory)
+	geoDownloads.meta.Unlock()
 	var assets []geoDataAsset
 	if needIP {
 		assets = append(assets, geoDataAsset{URL: geoIPURL, Filename: "geoip.dat", Title: "GeoIP"})
@@ -269,43 +363,41 @@ func ensureGeoData(ctx context.Context, dataDir string, needIP, needSite bool, g
 	if needSite {
 		assets = append(assets, geoDataAsset{URL: geoSiteURL, Filename: "geosite.dat", Title: "GeoSite"})
 	}
-	client := &http.Client{
-		Timeout: 60 * time.Second,
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) >= 4 {
-				return errors.New("слишком много перенаправлений")
-			}
-			_, err := normalizeGeoDataURL(request.URL.String(), "GeoData")
-			return err
-		},
-	}
-	changed := false
+	// Start every missing download first, so both files load in parallel.
+	pending := map[string]*geoDownload{}
 	for _, asset := range assets {
-		path := filepath.Join(info.Directory, asset.Filename)
 		entry, known := meta[asset.Filename]
-		stat, statErr := os.Stat(path)
+		stat, statErr := os.Stat(filepath.Join(info.Directory, asset.Filename))
 		usable := known && statErr == nil && entry.URL == asset.URL && entry.Size == stat.Size() && len(entry.Codes) > 0
-		if !usable || time.Since(entry.Updated) >= geoDataMaxAge {
-			codes, err := downloadGeoData(ctx, client, asset, path)
-			if err != nil && !usable {
-				return info, err
+		switch {
+		case !usable:
+			download := startGeoDownload(info.Directory, asset)
+			if download == nil {
+				return info, fmt.Errorf("%s: источник недоступен, повторим позже", asset.Title)
 			}
-			if err == nil {
-				stat, _ = os.Stat(path)
-				entry = geoDataEntry{URL: asset.URL, Size: stat.Size(), Updated: time.Now(), Codes: codes}
-				meta[asset.Filename] = entry
-				changed = true
+			pending[asset.Filename] = download
+		case time.Since(entry.Updated) >= geoDataMaxAge:
+			_ = startGeoDownload(info.Directory, asset)
+		}
+	}
+	for _, asset := range assets {
+		entry := meta[asset.Filename]
+		if download := pending[asset.Filename]; download != nil {
+			select {
+			case <-download.done:
+			case <-ctx.Done():
+				return info, fmt.Errorf("%s: загрузка идёт слишком долго, продолжится в фоне", asset.Title)
 			}
+			if download.err != nil {
+				return info, download.err
+			}
+			entry = download.entry
 		}
 		codes := make(map[string]bool, len(entry.Codes))
 		for _, code := range entry.Codes {
 			codes[code] = true
 		}
 		info.Codes[asset.Filename] = codes
-	}
-	if changed {
-		data, _ := json.Marshal(meta)
-		_ = writeFileAtomic(metaPath, data)
 	}
 	return info, nil
 }

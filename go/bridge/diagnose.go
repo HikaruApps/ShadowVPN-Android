@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -54,17 +55,17 @@ func Diagnose(profileID string) (string, error) {
 		resolvedNames++
 		if result.DNS.Detail == "" {
 			if net.ParseIP(info.OriginalAddress) != nil {
-				result.DNS.Detail = "Адрес сервера задан IP: " + info.SelectedAddress
+				result.DNS.Detail = "Найден · задан IP-адресом " + maskIP(info.SelectedAddress)
 			} else {
-				result.DNS.Detail = info.OriginalAddress + " → " + info.SelectedAddress
+				result.DNS.Detail = "Найден · " + info.OriginalAddress + " → " + maskIP(info.SelectedAddress)
 			}
 		}
 	}
 	result.DNS.OK = resolvedNames > 0
 	if !result.DNS.OK {
-		result.DNS.Detail = "Не удалось узнать IP сервера. Проверьте DNS провайдера или смените сеть"
+		result.DNS.Detail = "Не найден: не удалось узнать IP сервера. Проверьте DNS провайдера или смените сеть"
 		if dnsErr != nil {
-			result.DNS.Detail += " (" + shortError(dnsErr) + ")"
+			result.DNS.Detail += " (" + maskIPs(shortError(dnsErr)) + ")"
 		}
 		result.Server.Detail = "Пропущено: сервер не найден"
 		return marshalDiagnose(result)
@@ -96,12 +97,16 @@ func Diagnose(profileID string) (string, error) {
 	if len(working) > 0 {
 		sort.Slice(working, func(a, b int) bool { return working[a].latency < working[b].latency })
 		result.Server.OK = true
-		result.Server.Detail = fmt.Sprintf("%s отвечает за %d мс", working[0].name, working[0].latency)
+		// The sheet already names the server; with several (Auto, a
+		// balancer) say which one answered best.
 		if len(candidates) > 1 {
-			result.Server.Detail += fmt.Sprintf(" · работают %d из %d", len(working), len(candidates))
+			result.Server.Detail = fmt.Sprintf("Доступен · быстрее всех «%s», %d мс · работают %d из %d",
+				working[0].name, working[0].latency, len(working), len(candidates))
+		} else {
+			result.Server.Detail = fmt.Sprintf("Доступен · отвечает за %d мс", working[0].latency)
 		}
 	} else {
-		result.Server.Detail = "Сервер не пропускает трафик: " + explainProbeError(firstErr)
+		result.Server.Detail = "Недоступен: " + maskIPs(explainProbeError(firstErr))
 	}
 	return marshalDiagnose(result)
 }
@@ -150,7 +155,7 @@ func explainProbeError(err error) string {
 	text := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(text, "deadline") || strings.Contains(text, "timeout"):
-		return "нет ответа за 8 секунд: сервер недоступен из этой сети, перегружен или не принимает ваш ключ"
+		return "нет ответа за 8 секунд. Сервер заблокирован в этой сети, перегружен или не принимает ваш ключ"
 	case strings.Contains(text, "refused"):
 		return "сервер отклонил подключение. Возможно, он выключен"
 	case strings.Contains(text, "eof") || strings.Contains(text, "reset") || strings.Contains(text, "closed pipe"):
@@ -172,4 +177,28 @@ func shortError(err error) string {
 func marshalDiagnose(result diagnoseResult) (string, error) {
 	encoded, err := json.Marshal(result)
 	return string(encoded), err
+}
+
+var ipv4Pattern = regexp.MustCompile(`\b(\d{1,3}\.\d{1,3})\.\d{1,3}\.\d{1,3}\b`)
+
+// maskIP hides the host part of an address shown to the user: the last two
+// octets of IPv4, everything after the first two groups of IPv6.
+func maskIP(address string) string {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return maskIPs(address)
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return fmt.Sprintf("%d.%d.*.*", v4[0], v4[1])
+	}
+	groups := strings.SplitN(ip.String(), ":", 3)
+	if len(groups) < 3 {
+		return "*"
+	}
+	return groups[0] + ":" + groups[1] + ":*:*"
+}
+
+// maskIPs masks the IPv4 addresses inside a message, e.g. a dial error.
+func maskIPs(text string) string {
+	return ipv4Pattern.ReplaceAllString(text, "$1.*.*")
 }

@@ -93,7 +93,9 @@ Three layers, all in one process:
      claims it, so probes hand it back to the running VPN and switches serialize; probes drop a
      chained freedom hop and use built-in fragmentation, so they never need that state),
      `cache.go` (profile cache,
-     GeoData download with codes recorded in `meta.json`).
+     GeoData download with codes recorded in `meta.json`; downloads run in the background,
+     a connection waits at most 12 s for a missing list (90 s in proxy_only), refreshes and
+     failed sources never hold it up).
    - `subscription.go` (share links), `dns.go`, `bootstrap.go`, `auto.go`, `ping.go`,
      `geodata.go`, `identity.go` are shared with the desktop client; prefer keeping them
      close to upstream and put Android behaviour in the files above.
