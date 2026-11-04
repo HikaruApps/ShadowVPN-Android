@@ -1316,6 +1316,78 @@
     body.append(routingSettingsContent());
   }
 
+  // What a rule matches, in words.
+  function describeRule(rule) {
+    const [prefix, rest] = rule.includes(":") ? [rule.slice(0, rule.indexOf(":")).toLowerCase(), rule.slice(rule.indexOf(":") + 1)] : ["", rule];
+    const known = { "category-ru": "Российские сайты", "category-ads-all": "Реклама", youtube: "YouTube", google: "Google",
+      telegram: "Telegram", openai: "ChatGPT", netflix: "Netflix", instagram: "Instagram", twitter: "X (Twitter)", private: "Локальные сети" };
+    if (prefix === "geosite") return { title: known[rest.toLowerCase()] || rest, hint: `Список сайтов · ${rule}` };
+    if (prefix === "geoip") return { title: rest.toLowerCase() === "ru" ? "Российские IP" : known[rest.toLowerCase()] || rest.toUpperCase(), hint: `Список IP-адресов · ${rule}` };
+    if (prefix === "full") return { title: rest, hint: "Только этот адрес" };
+    if (prefix === "keyword") return { title: rest, hint: "Адреса со словом" };
+    if (prefix === "regexp") return { title: rest, hint: "Регулярное выражение" };
+    if (/^[\d.:a-f]+\/\d+$/i.test(rule) || /^\d+\.\d+\.\d+\.\d+$/.test(rule)) return { title: rule, hint: "IP-адрес" };
+    return { title: rule, hint: "Сайт и его поддомены" };
+  }
+
+  function ruleListEditor(text) {
+    let items = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const node = el("div", "rule-editor");
+    const list = el("div", "rule-list");
+    const input = el("input", "field");
+    input.placeholder = "example.com, geosite:youtube…";
+    input.spellcheck = false; input.autocapitalize = "off"; input.autocomplete = "off";
+    const addButton = button("Добавить", "secondary", () => add(input.value), true);
+    const entry = el("div", "rule-entry");
+    entry.append(input, addButton);
+    const paste = el("textarea", "field mono");
+    paste.placeholder = "Вставьте список: по одному на строку";
+    paste.hidden = true;
+    const pasteButton = button("Вставить списком", "ghost", () => {
+      if (paste.hidden) { paste.hidden = false; paste.focus(); pasteButton.textContent = "Добавить из списка"; return; }
+      add(paste.value.split(/[\r\n,]+/));
+      paste.value = ""; paste.hidden = true; pasteButton.textContent = "Вставить списком";
+    }, true);
+    const copyButton = button("Скопировать все", "ghost", () => {
+      native.copyText(items.join("\n"));
+      showToast(items.length ? "Правила скопированы" : "Список пуст");
+    }, true);
+    const tools = el("div", "rule-tools");
+    tools.append(pasteButton, copyButton);
+    const render = () => {
+      list.replaceChildren();
+      if (!items.length) {
+        list.append(el("p", "rule-empty", "Пока пусто. Добавьте сайт, например youtube.com"));
+        return;
+      }
+      items.forEach((rule, index) => {
+        const info = describeRule(rule);
+        const item = el("div", "rule-item");
+        const copy = el("span", "row-copy");
+        copy.append(el("b", null, info.title), el("small", null, info.hint));
+        const remove = el("button", "rule-remove");
+        remove.type = "button";
+        remove.setAttribute("aria-label", `Удалить ${rule}`);
+        remove.textContent = "×";
+        remove.addEventListener("click", () => { items.splice(index, 1); render(); });
+        item.append(copy, remove);
+        list.append(item);
+      });
+    };
+    function add(values) {
+      const next = (Array.isArray(values) ? values : [values])
+        .map(value => String(value).trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, ""))
+        .filter(Boolean);
+      next.forEach(value => { if (!items.includes(value)) items.push(value); });
+      input.value = "";
+      render();
+    }
+    input.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); add(input.value); } });
+    node.append(el("b", "rule-title", "Сайты и списки"), list, entry, paste, tools);
+    render();
+    return { node, add, value: () => items.join("\n") };
+  }
+
   function routingSettingsContent() {
     const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
@@ -1330,16 +1402,13 @@
     modeRow.querySelector(".row-copy").append(modeDetail);
     mode.addEventListener("change", () => { modeDetail.textContent = modeHint[mode.value] || ""; });
 
-    const rules = el("textarea", "field");
-    rules.placeholder = "example.com\ngeosite:youtube\ngeoip:ru";
-    rules.value = s.routingRules || "";
-    rules.spellcheck = false;
-    const rulesRow = row("Правила", "По одному на строку: домен, full:, keyword:, regexp:, geosite: или geoip:", rules);
-    rulesRow.classList.add("stack");
+    // Sites as a list (as in Amnezia): add, remove, paste many, copy all.
+    // Stored exactly as before, one rule per line.
+    const rules = ruleListEditor(s.routingRules || "");
+    const rulesRow = el("div", "row stack rules-row");
+    rulesRow.append(rules.node);
     const preset = button("Российские сайты напрямую", "secondary", () => {
-      const lines = rules.value.split(/\n/).map(line => line.trim()).filter(Boolean);
-      ["geosite:category-ru", "geoip:ru"].forEach(item => { if (!lines.includes(item)) lines.push(item); });
-      rules.value = lines.join("\n");
+      rules.add(["geosite:category-ru", "geoip:ru"]);
       if (mode.value === "full") { mode.value = "bypass"; mode.dispatchEvent(new Event("change")); }
     });
     rulesRow.append(preset);
@@ -1369,7 +1438,7 @@
       group("Источники списков", geoIPRow, geoSiteRow),
       el("p", "group-note", "Списки скачиваются при первом подключении с такими правилами и обновляются раз в неделю. Оставьте поля пустыми, чтобы использовать источники по умолчанию."),
       saveActions(() => ({
-        routingMode: mode.value, routingRules: rules.value, subscriptionRules: isOn(subscriptionRules),
+        routingMode: mode.value, routingRules: rules.value(), subscriptionRules: isOn(subscriptionRules),
         routeOnly: isOn(routeOnly), blockUdp: isOn(blockUdp),
         geoipUrl: geoIP.value.trim(), geositeUrl: geoSite.value.trim()
       })));

@@ -336,6 +336,22 @@ textarea.field[rows="2"]{height:68px}
 .toast{position:fixed;z-index:150;left:50%;bottom:104px;max-width:calc(100% - 32px);padding:10px 14px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface-2);font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.4);transform:translate(-50%,10px) scale(.97);opacity:0;pointer-events:none;transition:opacity 160ms var(--ease-in),transform 160ms var(--ease-in);will-change:transform,opacity}
 .toast.visible{opacity:1;transform:translate(-50%,0) scale(1);transition-duration:220ms;transition-timing-function:var(--ease-out)}
 
+/* ---------- Rule list ---------- */
+.rule-editor{display:flex;flex-direction:column;gap:10px}
+.rule-title{font-size:15px;font-weight:500}
+.rule-list{border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden}
+.rule-item{display:flex;align-items:center;gap:8px;min-height:48px;padding:6px 6px 6px 12px}
+.rule-item + .rule-item{border-top:1px solid var(--border)}
+.rule-item .row-copy b{font-size:14px;font-weight:500;overflow-wrap:anywhere}
+.rule-remove{flex:0 0 36px;width:36px;height:36px;border-radius:50%;color:var(--text-3);font-size:20px;line-height:1}
+.rule-remove:active{background:var(--surface-2);color:var(--danger)}
+.rule-empty{padding:14px 12px;color:var(--text-3);font-size:13px}
+.rule-entry{display:flex;gap:8px}
+.rule-entry .field{flex:1;min-width:0}
+.rule-entry .button{width:auto;padding:0 14px}
+.rule-tools{display:flex;gap:8px}
+.rule-tools .button{flex:1}
+
 /* ---------- Diagnostics ---------- */
 .diag-row{animation:rise 220ms var(--ease-out) both}
 .diag-mark{position:relative;flex:0 0 22px;width:22px;height:22px;border:2px solid var(--border-strong);border-radius:50%}
