@@ -419,6 +419,7 @@
       const ping = latencyText(server);
       setText("dockPing", ping.text);
       $("dockPing").className = `latency ${ping.cls}`;
+      updatePingPill(true);
     }
     // Sorting by latency reorders the list; "order" moves the cards without
     // rebuilding them.
@@ -462,6 +463,23 @@
     step();
     // Snapshots stop when nothing changes; the fade must not stop with them.
     if (!glowTimer) glowTimer = setInterval(step, 500);
+  }
+
+  // The selected server's latency under the connect button, as in Hiddify;
+  // a tap checks that server again (Auto and balancers re-check the list).
+  function updatePingPill(fresh = false) {
+    const pill = $("pingPill");
+    const selected = snapshot.selectedId ? serverModels.get(snapshot.selectedId) || snapshot.selected : null;
+    pill.hidden = !selected;
+    if (!selected) return;
+    const ping = latencyText(selected);
+    const text = ping.text || "Проверить";
+    const value = $("pingPillValue");
+    if (value.textContent !== text) {
+      value.textContent = text;
+      if (fresh && ping.cls !== "pending") popLatency(value);
+    }
+    pill.className = `ping-pill ${ping.cls}`;
   }
 
   /** A new check starts: every host waits for its own answer again. */
@@ -638,6 +656,7 @@
     const ping = selected ? latencyText(selected) : { text: "", cls: "" };
     setText("dockPing", ping.text);
     $("dockPing").className = `latency ${ping.cls}`;
+    updatePingPill();
     $("pingButton").classList.toggle("running", !!snapshot.pingRunning);
     $("pingButton").disabled = !!snapshot.pingRunning;
     $("refreshButton").disabled = !!snapshot.importRunning;
@@ -1723,6 +1742,17 @@
 
   $("powerButton").addEventListener("click", () => native.toggleVpn());
   $("welcomeScan").addEventListener("click", () => native.scanQr());
+  $("pingPill").addEventListener("click", () => {
+    const id = snapshot.selectedId;
+    const server = id ? serverModels.get(id) : null;
+    if (!server || snapshot.pingRunning || server.checking) return;
+    if (server.auto || server.members) { native.pingServers(); return; }
+    server.checking = true;
+    updatePingPill();
+    const card = serverCards.get(id);
+    if (card) updateServerCard(card, server);
+    native.pingServer(id);
+  });
   $("menuButton").addEventListener("click", event => { event.stopPropagation(); setMenu(!$("appMenu").classList.contains("open")); });
   document.addEventListener("click", event => {
     if (!event.target.closest(".app-menu,#menuButton")) closeMenu();
