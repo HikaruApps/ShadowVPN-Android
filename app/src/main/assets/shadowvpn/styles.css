@@ -327,6 +327,20 @@ textarea.field[rows="2"]{height:68px}
 .toast{position:fixed;z-index:150;left:50%;bottom:104px;max-width:calc(100% - 32px);padding:10px 14px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface-2);font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.4);transform:translate(-50%,10px) scale(.97);opacity:0;pointer-events:none;transition:opacity 160ms var(--ease-in),transform 160ms var(--ease-in);will-change:transform,opacity}
 .toast.visible{opacity:1;transform:translate(-50%,0) scale(1);transition-duration:220ms;transition-timing-function:var(--ease-out)}
 
+/* ---------- Subscription offer ---------- */
+.offer-scrim{position:fixed;z-index:140;inset:0;display:flex;align-items:flex-end;justify-content:center;padding:var(--gutter);background:rgba(0,0,0,.6);opacity:0;transition:opacity 180ms var(--ease-in)}
+.offer-scrim.open{opacity:1;transition-duration:240ms;transition-timing-function:var(--ease-out)}
+.offer-card{width:100%;max-width:480px;padding:20px 16px 8px;border:1px solid var(--border-strong);border-radius:var(--radius-lg);background:var(--surface);transform:translate3d(0,16px,0);transition:transform 240ms var(--ease-out)}
+.offer-scrim.open .offer-card{transform:none}
+.offer-source{display:block;color:var(--text-3);font-size:12px}
+.offer-card h3{margin-top:4px;font-size:18px;font-weight:600;letter-spacing:-.01em}
+.offer-host{display:block;margin-top:12px;font-size:15px;font-weight:500;overflow-wrap:anywhere}
+.offer-url{display:block;margin-top:4px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.offer-note{margin-top:12px;color:var(--text-2);font-size:13px;line-height:1.45}
+.offer-card .actions{margin-top:12px}
+.button.ghost{color:var(--text-2)}
+.welcome .button.secondary{margin-top:8px}
+
 /* ---------- Adaptation ---------- */
 @media (max-height:640px){
   .stage{gap:12px;padding-bottom:12px}

@@ -70,7 +70,10 @@ Three layers, all in one process:
      2 s after the default network changes, keeps the last results for 24 h (`ping_cache`, shown
      dimmed as `cached`) and re-checks one server on a tap on its latency (`pingServer`, a second
      attempt from the 3rd second). Inner-class bridge methods must call activity methods as
-     `MainActivity.this.x(...)`: a bare `x(...)` with the same name calls the bridge itself. Data
+     `MainActivity.this.x(...)`: a bare `x(...)` with the same name calls the bridge itself. Subscriptions
+     from outside (`shadowvpn://import/<https url>` deep link, clipboard on focus, QR via
+     zxing-android-embedded) always go through `window.ShadowVPN.offerSubscription` for the user
+     to confirm; nothing is added silently. Data
      crosses the boundary as JSON strings; global state lives in the mutex-guarded `mobile`
      struct. Only types gomobile supports may appear in exported signatures.
    - `session.go` keeps the TUN fd across Xray instances: a new instance starts without its

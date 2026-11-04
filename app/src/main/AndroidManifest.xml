@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Auto picks the Wi-Fi or mobile subscription by the current network. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -17,12 +18,25 @@
         android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round"
         android:usesCleartextTraffic="false" android:allowBackup="false"
         android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules">
-        <activity android:name=".MainActivity" android:exported="true">
+        <!-- singleTask: an import link or a shortcut reuses the open app instead
+             of stacking a second copy on top of the browser. -->
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- shadowvpn://import/<https subscription URL>: the "Add to app" button of a
+                 subscription page. The app always asks before adding it. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="shadowvpn" android:host="import" />
+            </intent-filter>
         </activity>
+        <!-- QR scanner of zxing-android-embedded; portrait like the rest of the app. -->
+        <activity android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:screenOrientation="portrait" tools:replace="android:screenOrientation" />
         <service android:name=".ShadowVpnService" android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="true" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

@@ -3,6 +3,7 @@ package net.shadownet.shadowvpn.android;
 import android.Manifest;
 import android.app.Activity;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -159,6 +160,139 @@ public final class MainActivity extends Activity {
         getWindow().setNavigationBarColor(UI_BACKGROUND);
         setupWebView();
         appWorker.execute(() -> installedAppsCache = installedAppsJson().toString());
+        handleIntent(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntent(intent);
+    }
+
+    // ---------- Subscriptions from outside: link, clipboard, QR ----------
+    // Nothing from outside is added silently: any web page can open a link,
+    // so the user always confirms in the app first.
+
+    private String pendingOffer = "";
+
+    private void handleIntent(Intent intent) {
+        if (intent == null) return;
+        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) {
+            String url = subscriptionFromLink(intent.getDataString());
+            if (!url.isEmpty()) offerSubscription(url, "link");
+            else showMessage("Ссылка не содержит HTTPS-подписку");
+        }
+    }
+
+    /**
+     * shadowvpn://import/https://host/path#Name, the same form as Hiddify's
+     * hiddify://import/...; the URL may also be percent-encoded or passed as
+     * shadowvpn://import?url=....
+     */
+    static String subscriptionFromLink(String link) {
+        if (link == null) return "";
+        Uri uri = Uri.parse(link);
+        if (!"shadowvpn".equalsIgnoreCase(uri.getScheme())
+                || !"import".equalsIgnoreCase(uri.getHost())) return "";
+        String value = uri.getQueryParameter("url");
+        if (value == null || value.isEmpty()) {
+            int start = link.toLowerCase(Locale.ROOT).indexOf("import/");
+            value = start < 0 ? "" : link.substring(start + "import/".length());
+            int hash = value.indexOf('#');
+            if (hash >= 0) value = value.substring(0, hash);
+            if (value.regionMatches(true, 0, "https%3A", 0, 8)) value = Uri.decode(value);
+        }
+        return isHttpsLink(value) ? value.trim() : "";
+    }
+
+    static boolean isHttpsLink(String value) {
+        if (value == null) return false;
+        value = value.trim();
+        if (value.isEmpty() || value.contains(" ") || value.contains("\n")) return false;
+        Uri uri = Uri.parse(value);
+        return "https".equalsIgnoreCase(uri.getScheme()) && uri.getHost() != null
+                && !uri.getHost().isEmpty();
+    }
+
+    private void offerSubscription(String url, String source) {
+        String wifi = preferences.getString("subscription_wifi", "");
+        String lte = preferences.getString("subscription_lte", "");
+        if (url.equals(wifi) || url.equals(lte)) {
+            if (!"clipboard".equals(source)) showMessage("Эта подписка уже добавлена");
+            return;
+        }
+        pendingOffer = "";
+        try {
+            JSONObject offer = new JSONObject().put("url", url).put("source", source);
+            if (!webReady || webView == null) {
+                pendingOffer = offer.toString();
+                return;
+            }
+            webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.offerSubscription("
+                    + offer + ")", null);
+        } catch (Exception ignored) { }
+    }
+
+    private void deliverPendingOffer() {
+        if (pendingOffer.isEmpty() || !webReady || webView == null) return;
+        webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.offerSubscription("
+                + pendingOffer + ")", null);
+        pendingOffer = "";
+    }
+
+    private void showMessage(String message) {
+        uiMessage = message;
+        pushSnapshot();
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // Android lets only the focused app read the clipboard.
+        if (hasFocus) checkClipboard();
+    }
+
+    /**
+     * Offers a subscription link the user just copied. The description is read
+     * first: it does not count as reading the clipboard, so Android's "pasted"
+     * notice appears only once per new clip, and only for text.
+     */
+    private void checkClipboard() {
+        try {
+            ClipboardManager manager = getSystemService(ClipboardManager.class);
+            if (manager == null) return;
+            ClipDescription description = manager.getPrimaryClipDescription();
+            if (description == null || !description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) return;
+            long stamp = description.getTimestamp();
+            if (stamp <= preferences.getLong("clipboard_checked_at", 0)) return;
+            preferences.edit().putLong("clipboard_checked_at", stamp).apply();
+            ClipData clip = manager.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) return;
+            CharSequence text = clip.getItemAt(0).getText();
+            String value = text == null ? "" : text.toString().trim();
+            String url = value.startsWith("shadowvpn://") ? subscriptionFromLink(value) : value;
+            if (isHttpsLink(url)) offerSubscription(url, "clipboard");
+        } catch (RuntimeException ignored) { }
+    }
+
+    private static final int QR_REQUEST = com.google.zxing.integration.android.IntentIntegrator.REQUEST_CODE;
+
+    private void scanQr() {
+        new com.google.zxing.integration.android.IntentIntegrator(this)
+                .setDesiredBarcodeFormats(com.google.zxing.integration.android.IntentIntegrator.QR_CODE)
+                .setPrompt("Наведите камеру на QR-код подписки")
+                .setBeepEnabled(false)
+                .setOrientationLocked(true)
+                .initiateScan();
+    }
+
+    private void handleQrResult(int resultCode, Intent data) {
+        com.google.zxing.integration.android.IntentResult result =
+                com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(resultCode, data);
+        if (result == null || result.getContents() == null) return;
+        String value = result.getContents().trim();
+        String url = value.startsWith("shadowvpn://") ? subscriptionFromLink(value) : value;
+        if (isHttpsLink(url)) offerSubscription(url, "qr");
+        else showMessage("В QR-коде нет HTTPS-ссылки на подписку");
     }
 
     private void setupWebView() {
@@ -190,6 +324,7 @@ public final class MainActivity extends Activity {
                 // A reloaded page lost the latencies; they are not part of the snapshot.
                 requeuePingResults();
                 loadCachedServers();
+                deliverPendingOffer();
             }
         });
         setContentView(createInsetRoot(webView));
@@ -834,6 +969,7 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request == VPN_REQUEST && result == RESULT_OK) startSelectedServer();
+        if (request == QR_REQUEST) handleQrResult(result, data);
     }
 
     private void startSelectedServer() {
@@ -1455,6 +1591,7 @@ public final class MainActivity extends Activity {
             ui.post(() -> importSubscriptions(true));
         }
 
+        @JavascriptInterface public void scanQr() { ui.post(MainActivity.this::scanQr); }
         @JavascriptInterface public void pingServers() { ui.post(MainActivity.this::runPings); }
         // Qualified, or the call would resolve to this bridge method itself.
         @JavascriptInterface public void pingServer(String id) {

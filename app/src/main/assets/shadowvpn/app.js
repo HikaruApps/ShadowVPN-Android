@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id);
   const hasNativeBridge = !!window.ShadowVpnAndroid;
   const native = window.ShadowVpnAndroid || {
-    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {},
+    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {}, scanQr() {},
     saveSubscriptions() {}, saveSettings() {}, getLogs() { return ""; }, copyText() {}, openVpnSettings() {},
     getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}, resetProxyCredentials() {}
   };
@@ -1635,6 +1635,7 @@
     const manualRow = row("Свои конфигурации", "Xray JSON или ссылки vless, vmess, trojan, ss, hy2, naive", manual);
     manualRow.classList.add("stack");
     body.append(group("Вручную", manualRow));
+    body.append(actions(button("Сканировать QR-код", "secondary", () => native.scanQr())));
     body.append(actions(
       button("Сохранить и обновить", "primary", () => {
         const working = { wifi: wifi.input.value.trim(), lte: lte.input.value.trim(), manual: manual.value.trim() };
@@ -1657,7 +1658,57 @@
     body.append(log, actions(button("Копировать", "secondary", () => native.copyText(log.textContent))));
   }
 
+  // ---------- A subscription from a link, the clipboard or a QR code ----------
+  // Android hands it over; nothing is added until the user picks a slot.
+  let offerNode = null;
+
+  function closeOffer() {
+    if (!offerNode) return false;
+    const node = offerNode;
+    offerNode = null;
+    node.classList.remove("open");
+    setTimeout(() => node.remove(), 200);
+    return true;
+  }
+
+  function offerSubscription(offer) {
+    if (!offer || !offer.url) return;
+    closeOffer();
+    let host = offer.url;
+    try { host = new URL(offer.url).host; } catch (_) {}
+    const sourceText = { link: "Ссылка из браузера", clipboard: "Скопировано в буфер обмена", qr: "Из QR-кода" }[offer.source] || "";
+    const slots = snapshot.subscriptions || { wifi: "", lte: "", manual: "" };
+    const save = slot => {
+      const working = { wifi: slots.wifi || "", lte: slots.lte || "", manual: slots.manual || "", [slot]: offer.url };
+      if (working.wifi && working.wifi === working.lte) working.lte = "";
+      snapshot.subscriptions = working;
+      native.saveSubscriptions(JSON.stringify(working));
+      closeOffer();
+    };
+    const choices = [];
+    if (!slots.wifi) choices.push(button("Добавить", "primary", () => save("wifi")));
+    else {
+      choices.push(button("Заменить подписку Wi-Fi", slots.lte ? "secondary" : "secondary", () => save("wifi")));
+      choices.push(button(slots.lte ? "Заменить мобильную" : "Добавить для мобильной сети", slots.lte ? "secondary" : "primary", () => save("lte")));
+    }
+    choices.push(button("Отмена", "ghost", closeOffer));
+    const scrim = el("div", "offer-scrim");
+    const card = el("div", "offer-card");
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-label", "Добавить подписку");
+    const url = el("small", "mono offer-url", offer.url);
+    card.append(el("span", "offer-source", sourceText), el("h3", null, "Добавить подписку?"), el("b", "offer-host", host), url,
+      el("p", "offer-note", slots.wifi ? "Подписка Wi-Fi уже есть. Новая может её заменить или работать в мобильной сети." : "Серверы из неё загрузятся сразу."),
+      actions(...choices));
+    scrim.append(card);
+    scrim.addEventListener("click", event => { if (event.target === scrim) closeOffer(); });
+    document.body.append(scrim);
+    offerNode = scrim;
+    afterFirstPaint(() => scrim.classList.add("open"));
+  }
+
   function closeTopLayer() {
+    if (closeOffer()) return true;
     if ($("appMenu").classList.contains("open")) { closeMenu(); return true; }
     if (!panelOverlay.hidden && panelBackAction) { panelBackAction(); return true; }
     if (closePanel()) return true;
@@ -1671,6 +1722,7 @@
   document.addEventListener("visibilitychange", () => { if (document.hidden) flushSettings(true); });
 
   $("powerButton").addEventListener("click", () => native.toggleVpn());
+  $("welcomeScan").addEventListener("click", () => native.scanQr());
   $("menuButton").addEventListener("click", event => { event.stopPropagation(); setMenu(!$("appMenu").classList.contains("open")); });
   document.addEventListener("click", event => {
     if (!event.target.closest(".app-menu,#menuButton")) closeMenu();
@@ -1738,6 +1790,7 @@
     pingResult(item) { applyPingResult(item); },
     // The selection changed: mark the card without rebuilding the list.
     selectedServer(id) { applySelectedServer(id); },
+    offerSubscription(offer) { offerSubscription(offer); },
     installedApps(payload) { if (splitAppsReceiver) splitAppsReceiver(payload); },
     appIcon(packageName, source) {
       panelBody.querySelectorAll(".app-icon").forEach(slot => {

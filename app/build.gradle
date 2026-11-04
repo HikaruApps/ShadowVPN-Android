@@ -47,4 +47,8 @@ android {
     }
 }
 
-dependencies { implementation files('libs/shadowvpn-core.aar') }
+dependencies {
+    implementation files('libs/shadowvpn-core.aar')
+    // QR scanner without Google Play services; depends only on zxing core.
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+}
