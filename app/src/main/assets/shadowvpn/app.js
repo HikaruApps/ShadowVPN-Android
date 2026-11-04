@@ -436,35 +436,6 @@
       { duration: 450, easing: "cubic-bezier(.34,1.56,.64,1)" });
   }
 
-  // The connect button glows with the live traffic, like Hiddify's corona:
-  // the light follows a rise quickly (about 0.8 s) and fades slowly (about
-  // 2.5 s), on a log scale so a page load and a download both show.
-  let glowLevel = 0;
-  let glowTimer = 0;
-  function trafficLevel() {
-    const rate = (Number(snapshot.traffic?.downloadRate) || 0) + (Number(snapshot.traffic?.uploadRate) || 0);
-    // 0 at idle, 1 at about 10 MB/s.
-    return Math.min(1, Math.log10(1 + rate / 1024) / 4);
-  }
-  function updateGlow(connected) {
-    const power = $("powerButton");
-    if (!connected || noMotion()) {
-      clearInterval(glowTimer); glowTimer = 0; glowLevel = 0;
-      power.style.removeProperty("--glow");
-      return;
-    }
-    const step = () => {
-      const target = trafficLevel();
-      // Rise at once (CSS smooths it); decay with a 2.5 s time constant.
-      glowLevel = target >= glowLevel ? target : target + (glowLevel - target) * Math.exp(-0.5 / 2.5);
-      const value = glowLevel < 0.01 ? "0" : glowLevel.toFixed(2);
-      if (power.style.getPropertyValue("--glow") !== value) power.style.setProperty("--glow", value);
-    };
-    step();
-    // Snapshots stop when nothing changes; the fade must not stop with them.
-    if (!glowTimer) glowTimer = setInterval(step, 500);
-  }
-
   // The selected server's latency under the connect button, as in Hiddify;
   // a tap checks that server again (Auto and balancers re-check the list).
   function updatePingPill(fresh = false) {
@@ -635,7 +606,6 @@
     power.disabled = connecting || !snapshot.selected || !!snapshot.switchingTo;
     power.setAttribute("aria-label", connected || state === "blocked" ? "Отключить VPN" : "Подключить VPN");
     renderStatus(connected, connecting);
-    updateGlow(connected);
 
     setText("ipLabel", connected ? "Защищённый IP" : "IP");
     setText("ipValue", snapshot.publicIp || (connecting || state === "blocked" ? "—" : "Определяем…"));
