@@ -64,7 +64,7 @@ Three layers, all in one process:
    - Exported gomobile API in `bridge.go`: `SetDataDir`, `SetDeviceSeed`, `DeviceHWID`,
      `LoadCachedProfiles`, `Configure(optionsJSON)`, `ImportSources({"urls","manual"})`,
      `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `StartProxy` (local proxy only, no TUN), `Stop`, `SwitchProfile(profileID)`,
-     `Reload`, `PublicIP`, `Logs`, `LastWarning` (non-fatal note of the last Prepare, e.g. dropped
+     `Reload`, `PublicIP`, `Logs`, `Diagnose(id)` (DNS + real-check step results with human reasons, `diagnose.go`), `LastWarning` (non-fatal note of the last Prepare, e.g. dropped
      geo rules); `android_ping.go`: `PingPlan` + `PingProfile(id, method)` let Java check servers
      one by one and stream each latency to the UI (`window.ShadowVPN.pingResult`). Java also re-checks
      2 s after the default network changes, keeps the last results for 24 h (`ping_cache`, shown

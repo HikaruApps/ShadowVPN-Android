@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id);
   const hasNativeBridge = !!window.ShadowVpnAndroid;
   const native = window.ShadowVpnAndroid || {
-    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {}, scanQr() {},
+    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {}, scanQr() {}, runDiagnostics() {},
     saveSubscriptions() {}, saveSettings() {}, getLogs() { return ""; }, copyText() {}, openVpnSettings() {},
     getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}, resetProxyCredentials() {}
   };
@@ -898,6 +898,7 @@
       if (name === "settings") buildSettings();
       if (name === "subscriptions") buildSubscriptions();
       if (name === "logs") buildLogs();
+      if (name === "diagnostics") buildDiagnostics();
     });
   }
 
@@ -1671,6 +1672,50 @@
       })));
   }
 
+  // Connection check, step by step (Hiddify's connection health sheet).
+  let diagnosticsRows = null;
+  const DIAGNOSTIC_STEPS = [
+    ["network", "Сеть телефона", "Есть ли интернет без VPN"],
+    ["dns", "Адрес сервера", "Находится ли сервер по имени"],
+    ["server", "Сервер", "Проходит ли трафик через сервер"],
+    ["vpn", "Интернет через VPN", "Работает ли подключённый туннель"]
+  ];
+
+  function buildDiagnostics() {
+    const body = page("Диагностика", null);
+    const list = el("div", "list diagnostics");
+    diagnosticsRows = new Map();
+    DIAGNOSTIC_STEPS.forEach(([id, title, hint], index) => {
+      const node = row(title, hint);
+      node.classList.add("diag-row");
+      node.style.animationDelay = `${index * 60}ms`;
+      const mark = el("i", "diag-mark");
+      node.prepend(mark);
+      diagnosticsRows.set(id, { node, mark, detail: node.querySelector("small") });
+      list.append(node);
+    });
+    const selected = snapshot.selectedId ? serverModels.get(snapshot.selectedId) || snapshot.selected : null;
+    body.append(
+      el("p", "group-note", selected ? `Проверяем «${selected.name}» и путь до него.` : "Сервер не выбран: проверим только сеть."),
+      list,
+      actions(button("Проверить снова", "secondary", startDiagnostics)));
+    startDiagnostics();
+  }
+
+  function startDiagnostics() {
+    if (!diagnosticsRows) return;
+    DIAGNOSTIC_STEPS.forEach(([id, , hint]) => diagnosticsStep({ id, state: "wait", detail: hint }));
+    native.runDiagnostics();
+  }
+
+  function diagnosticsStep(step) {
+    const item = diagnosticsRows?.get(step?.id);
+    if (!item) return;
+    item.node.dataset.state = step.state;
+    if (step.detail) item.detail.textContent = step.detail;
+    else if (step.state === "running") item.detail.textContent = "Проверяем…";
+  }
+
   function buildLogs(fromSettings = false) {
     const body = page("Логи", fromSettings ? () => buildSettings() : null);
     const log = el("pre", "log-box", native.getLogs() || "Событий пока нет");
@@ -1821,6 +1866,7 @@
     // The selection changed: mark the card without rebuilding the list.
     selectedServer(id) { applySelectedServer(id); },
     offerSubscription(offer) { offerSubscription(offer); },
+    diagnosticsStep(step) { diagnosticsStep(step); },
     installedApps(payload) { if (splitAppsReceiver) splitAppsReceiver(payload); },
     appIcon(packageName, source) {
       panelBody.querySelectorAll(".app-icon").forEach(slot => {
@@ -1857,9 +1903,15 @@
   if (preview === "servers") { openServers(); renderServers(true); }
   if (preview === "menu") setMenu(true);
   if (preview === "welcome") render({ needsSubscription:true });
-  if (["settings", "subscriptions", "logs"].includes(preview)) {
+  if (["settings", "subscriptions", "logs", "diagnostics"].includes(preview)) {
     openPanel(preview);
-    ({ settings:buildSettings, subscriptions:buildSubscriptions, logs:buildLogs })[preview]();
+    ({ settings:buildSettings, subscriptions:buildSubscriptions, logs:buildLogs, diagnostics:buildDiagnostics })[preview]();
+    if (preview === "diagnostics") {
+      diagnosticsStep({ id:"network", state:"ok", detail:"Wi-Fi · интернет есть" });
+      diagnosticsStep({ id:"dns", state:"ok", detail:"de.example.com → 203.0.113.10" });
+      diagnosticsStep({ id:"server", state:"fail", detail:"Сервер не пропускает трафик: сервер обрывает соединение. Обычно это неверный ключ или истёкшая подписка" });
+      diagnosticsStep({ id:"vpn", state:"skip", detail:"VPN не подключён: подключитесь и запустите проверку снова" });
+    }
   }
   if (["providers", "ping", "network", "connection", "tunnel", "proxy", "routing", "split", "application", "about", "auto"].includes(preview)) {
     openPanel("settings");

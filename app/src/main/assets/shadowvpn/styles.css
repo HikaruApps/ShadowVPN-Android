@@ -336,6 +336,17 @@ textarea.field[rows="2"]{height:68px}
 .toast{position:fixed;z-index:150;left:50%;bottom:104px;max-width:calc(100% - 32px);padding:10px 14px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface-2);font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.4);transform:translate(-50%,10px) scale(.97);opacity:0;pointer-events:none;transition:opacity 160ms var(--ease-in),transform 160ms var(--ease-in);will-change:transform,opacity}
 .toast.visible{opacity:1;transform:translate(-50%,0) scale(1);transition-duration:220ms;transition-timing-function:var(--ease-out)}
 
+/* ---------- Diagnostics ---------- */
+.diag-row{animation:rise 220ms var(--ease-out) both}
+.diag-mark{position:relative;flex:0 0 22px;width:22px;height:22px;border:2px solid var(--border-strong);border-radius:50%}
+.diag-row[data-state="running"] .diag-mark{border-top-color:var(--text-2);animation:spin 800ms linear infinite}
+.diag-row[data-state="ok"] .diag-mark{border-color:var(--success);background:var(--success)}
+.diag-row[data-state="ok"] .diag-mark::after{content:"";position:absolute;left:6px;top:2px;width:5px;height:10px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)}
+.diag-row[data-state="fail"] .diag-mark{border-color:var(--danger);background:var(--danger)}
+.diag-row[data-state="fail"] .diag-mark::after{content:"!";position:absolute;inset:0;display:grid;place-items:center;color:var(--bg);font-size:13px;font-weight:700;line-height:18px;text-align:center}
+.diag-row[data-state="skip"]{opacity:.55}
+.diag-row[data-state="fail"] small{color:var(--danger)}
+
 /* ---------- Subscription offer ---------- */
 .offer-scrim{position:fixed;z-index:140;inset:0;display:flex;align-items:flex-end;justify-content:center;padding:var(--gutter);background:rgba(0,0,0,.6);opacity:0;transition:opacity 180ms var(--ease-in)}
 .offer-scrim.open{opacity:1;transition-duration:240ms;transition-timing-function:var(--ease-out)}

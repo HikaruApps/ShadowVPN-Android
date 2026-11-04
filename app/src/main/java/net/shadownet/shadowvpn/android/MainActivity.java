@@ -77,6 +77,7 @@ public final class MainActivity extends Activity {
     // A ping can take minutes, so it gets its own thread and never delays an
     // import or the public IP lookup.
     private final ExecutorService pingRunner = Executors.newSingleThreadExecutor();
+    private final ExecutorService diagnosticsRunner = Executors.newSingleThreadExecutor();
     private String switchingTo = "";
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final List<ServerItem> servers = new ArrayList<>();
@@ -411,6 +412,7 @@ public final class MainActivity extends Activity {
         appWorker.shutdownNow();
         switchWorker.shutdownNow();
         pingRunner.shutdownNow();
+        diagnosticsRunner.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("ShadowVpnAndroid");
             webView.destroy();
@@ -852,6 +854,76 @@ public final class MainActivity extends Activity {
                     entry.getValue().latency, entry.getValue().available, pingResultsCached));
         }
         schedulePingFlush();
+    }
+
+    // ---------- Connection check: network, DNS, server, internet via VPN ----------
+
+    private void runDiagnostics() {
+        String profileId = selectedId;
+        diagnosticsRunner.execute(() -> {
+            diagnosticStep("network", "running", "");
+            String[] network = networkState();
+            diagnosticStep("network", network[0], network[1]);
+            if (!"ok".equals(network[0])) {
+                diagnosticStep("dns", "skip", "Пропущено: нет сети");
+                diagnosticStep("server", "skip", "Пропущено: нет сети");
+                diagnosticStep("vpn", "skip", "Пропущено: нет сети");
+                return;
+            }
+            diagnosticStep("dns", "running", "");
+            diagnosticStep("server", "running", "");
+            try {
+                JSONObject result = new JSONObject(Bridge.diagnose(profileId));
+                JSONObject dns = result.getJSONObject("dns");
+                JSONObject server = result.getJSONObject("server");
+                diagnosticStep("dns", dns.optBoolean("ok") ? "ok" : "fail", dns.optString("detail"));
+                diagnosticStep("server", server.optBoolean("ok") ? "ok"
+                        : dns.optBoolean("ok") ? "fail" : "skip", server.optString("detail"));
+            } catch (Exception error) {
+                diagnosticStep("dns", "fail", cleanError(error));
+                diagnosticStep("server", "skip", "Пропущено");
+            }
+            if (!ShadowVpnService.connected) {
+                diagnosticStep("vpn", "skip", "VPN не подключён: подключитесь и запустите проверку снова");
+                return;
+            }
+            diagnosticStep("vpn", "running", "");
+            try {
+                diagnosticStep("vpn", "ok", "Интернет через VPN работает · IP " + maskIp(Bridge.publicIP()));
+            } catch (Exception error) {
+                diagnosticStep("vpn", "fail", "Через туннель нет интернета: " + cleanError(error));
+            }
+        });
+    }
+
+    /** {state, detail} of the phone's own network, outside the VPN. */
+    private String[] networkState() {
+        ConnectivityManager manager = getSystemService(ConnectivityManager.class);
+        try {
+            Network network = manager == null ? null : manager.getActiveNetwork();
+            NetworkCapabilities caps = network == null ? null : manager.getNetworkCapabilities(network);
+            if (caps == null) return new String[]{"fail", "Телефон не подключён к сети"};
+            String kind = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "Wi-Fi"
+                    : caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "Мобильная сеть"
+                    : caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ? "Ethernet" : "Сеть";
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                return new String[]{"fail", kind + " без доступа в интернет: Android не смог выйти в сеть"};
+            }
+            return new String[]{"ok", kind + " · интернет есть"};
+        } catch (RuntimeException error) {
+            return new String[]{"fail", "Не удалось проверить сеть"};
+        }
+    }
+
+    private void diagnosticStep(String id, String state, String detail) {
+        ui.post(() -> {
+            if (!webReady || webView == null) return;
+            try {
+                JSONObject step = new JSONObject().put("id", id).put("state", state).put("detail", detail);
+                webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.diagnosticsStep("
+                        + step + ")", null);
+            } catch (Exception ignored) { }
+        });
     }
 
     private void finishPings() {
@@ -1592,6 +1664,7 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void scanQr() { ui.post(MainActivity.this::scanQr); }
+        @JavascriptInterface public void runDiagnostics() { ui.post(MainActivity.this::runDiagnostics); }
         @JavascriptInterface public void pingServers() { ui.post(MainActivity.this::runPings); }
         // Qualified, or the call would resolve to this bridge method itself.
         @JavascriptInterface public void pingServer(String id) {
