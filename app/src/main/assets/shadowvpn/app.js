@@ -526,7 +526,15 @@
       ? `${total} ${plural(total, ["сервер", "сервера", "серверов"])}`
       : `${visible.length} из ${total}`);
     if (!visible.length) {
-      serverList.append(el("div", "empty-list", snapshot.importRunning ? "Загружаем серверы…" : "Нет серверов"));
+      if (snapshot.importRunning) {
+        // Shimmering skeleton cards while the subscription loads (Hiddify).
+        for (let i = 0; i < 6; i++) {
+          const card = el("div", "skeleton-card");
+          card.append(el("i", "skeleton flag"), el("span", "skeleton-lines"));
+          card.lastChild.append(el("i", "skeleton line"), el("i", "skeleton line short"));
+          serverList.append(card);
+        }
+      } else serverList.append(el("div", "empty-list", "Нет серверов"));
       serverPager = null;
       return;
     }
@@ -631,6 +639,8 @@
 
     setText("ipLabel", connected ? "Защищённый IP" : "IP");
     setText("ipValue", snapshot.publicIp || (connecting || state === "blocked" ? "—" : "Определяем…"));
+    // Still waiting for the address: shimmer instead of a static word.
+    $("ipValue").classList.toggle("shimmer-text", !snapshot.publicIp && !connecting && state !== "blocked");
     setText("sessionTime", snapshot.session || "00:00:00");
     $("sessionTime").hidden = !connected;
     $("detailsDivider").hidden = !connected;
