@@ -148,6 +148,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        CrashLog.install(this);
         preferences = CoreConfig.preferences(this);
         CoreConfig.initialize(this);
         migrateSubscriptionSlots();
@@ -1808,6 +1809,8 @@ public final class MainActivity extends Activity {
             String core = "";
             try { core = Bridge.logs(); } catch (Exception ignored) { }
             String app = ShadowVpnService.getLogs();
+            String crash = CrashLog.read(MainActivity.this);
+            if (!crash.isEmpty()) app = "— Последний вылет приложения —\n" + crash + "\n— События —\n" + app;
             return maskIps(core.trim().isEmpty() ? app : app + "\n— Xray —\n" + core);
         }
 

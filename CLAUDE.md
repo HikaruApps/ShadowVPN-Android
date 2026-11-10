@@ -54,6 +54,7 @@ Three layers, all in one process:
      State goes back to JS by `evaluateJavascript("window.ShadowVPN.render(<snapshot>)")`.
      Settings/subscriptions persist in `SharedPreferences("shadowvpn")`. Blocking
      Go calls run on background executors, results posted to the UI thread.
+   - `CrashLog` keeps the last uncaught exception (`last_crash.txt`), shown at the top of Logs.
    - `CoreConfig` builds the Go core's options from preferences; both the activity and the
      service use it, so the service can connect on its own (always-on VPN after boot,
      automatic reconnect when settings change or Auto's network changes).
@@ -75,7 +76,8 @@ Three layers, all in one process:
      attempt from the 3rd second). Inner-class bridge methods must call activity methods as
      `MainActivity.this.x(...)`: a bare `x(...)` with the same name calls the bridge itself. Subscriptions
      from outside (`shadowvpn://import/<https url>` deep link, clipboard on focus, QR via
-     zxing-android-embedded) always go through `window.ShadowVPN.offerSubscription` for the user
+     zxing-android-embedded, whose scanner needs `androidx.core` although its POM omits it, hence that
+     dependency and `android.useAndroidX`) always go through `window.ShadowVPN.offerSubscription` for the user
      to confirm; nothing is added silently. Data
      crosses the boundary as JSON strings; global state lives in the mutex-guarded `mobile`
      struct. Only types gomobile supports may appear in exported signatures.
