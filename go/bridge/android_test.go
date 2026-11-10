@@ -805,9 +805,9 @@ func TestImportSourcesCanOmitHWID(t *testing.T) {
 	}))
 	defer server.Close()
 	// Without a running tunnel subscriptions use the default transport.
-	previous := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	defer func() { http.DefaultTransport = previous }()
+	previous := directTLSConfig
+	directTLSConfig = server.Client().Transport.(*http.Transport).TLSClientConfig
+	defer func() { directTLSConfig = previous }()
 
 	for _, test := range []struct {
 		payload map[string]any

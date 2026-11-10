@@ -120,18 +120,39 @@ func PingProfile(profileID, method string) (string, error) {
 
 	var latency int64
 	var err error
+	direct := false
 	switch method {
 	case "real":
 		latency, err = realPingProfile(ctx, target, fragmentation)
+		// The check through the server failed, but the server may still
+		// answer over the phone's network: under mobile whitelists that is
+		// what tells the servers that get through from the rest. Shown apart
+		// from a passed check. UDP protocols have no TCP port to knock on.
+		if err != nil && !udpProtocols[target.Protocol] {
+			if tcp, tcpErr := directTCPLatency(ctx, target); tcpErr == nil {
+				latency, err, direct = tcp, nil, true
+			}
+		}
 	default:
 		latency, _, err = tcpPingEndpoint(ctx, target.address, target.port)
 	}
 
-	result, marshalErr := json.Marshal(PingResult{
-		ID: target.ID, LatencyMS: latency, Available: err == nil,
+	result, marshalErr := json.Marshal(streamedPingResult{
+		ID: target.ID, LatencyMS: latency, Available: err == nil, Direct: direct,
 	})
 	if marshalErr != nil {
 		return "", marshalErr
 	}
 	return string(result), nil
 }
+
+// streamedPingResult is PingResult plus Direct: the server's port answered
+// over the phone's network, but the check through the server did not pass.
+type streamedPingResult struct {
+	ID        string `json:"id"`
+	LatencyMS int64  `json:"latencyMs,omitempty"`
+	Available bool   `json:"available"`
+	Direct    bool   `json:"direct,omitempty"`
+}
+
+var udpProtocols = map[string]bool{"hysteria": true, "hysteria2": true, "tuic": true, "wireguard": true}

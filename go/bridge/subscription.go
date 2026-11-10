@@ -220,37 +220,138 @@ func fetchSubscription(ctx context.Context, address string) ([]Profile, int, sub
 	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
 		return nil, 0, subscriptionMetadata{}, errors.New("Нужна HTTPS-ссылка на подписку")
 	}
-	client := &http.Client{Transport: subscriptionTransport(), Timeout: 20 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
+	body, metadata, err := downloadSubscriptionBody(ctx, u.String())
+	if err != nil {
+		return nil, 0, metadata, err
+	}
+	skipped := 0
+	profiles, err := parseSubscriptionWithStats(body, &skipped)
+	return profiles, skipped, metadata, err
+}
+
+// subscriptionAnswerError is an answer from the subscription server itself
+// (an HTTP status, an oversized body): another route would get the same.
+type subscriptionAnswerError struct{ message string }
+
+func (e subscriptionAnswerError) Error() string { return e.message }
+
+// subscriptionTunnel is replaced in tests, which run no Xray instance.
+var subscriptionTunnel = subscriptionTransport
+
+// tunnelHeadStart is how long the direct request runs alone before the
+// tunnel joins in.
+var tunnelHeadStart = 2 * time.Second
+
+// downloadSubscriptionBody fetches a subscription over the phone's own
+// network first, as Hiddify does, retrying once. That is the route that
+// works under mobile whitelists, where the panel is reachable but the VPN
+// server's exit may not be allowed to it. When the tunnel is up it races
+// in after a head start, for a panel the provider blocks directly; the
+// first good answer wins.
+func downloadSubscriptionBody(ctx context.Context, address string) ([]byte, subscriptionMetadata, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		body     []byte
+		metadata subscriptionMetadata
+		err      error
+	}
+	answers := make(chan answer, 2)
+	direct := func() {
+		var result answer
+		for attempt := 0; attempt < 2; attempt++ {
+			if attempt > 0 {
+				select {
+				case <-time.After(time.Second):
+				case <-ctx.Done():
+					answers <- result
+					return
+				}
+			}
+			result.body, result.metadata, result.err = requestSubscription(ctx, directTransport(), address)
+			var answerErr subscriptionAnswerError
+			if result.err == nil || errors.As(result.err, &answerErr) {
+				break
+			}
+		}
+		answers <- result
+	}
+	tunnel := subscriptionTunnel()
+	go direct()
+	pending := 1
+	var timer <-chan time.Time
+	if tunnel != nil {
+		timer = time.After(tunnelHeadStart)
+	}
+	var first answer
+	haveFirst := false
+	for pending > 0 || timer != nil {
+		select {
+		case <-timer:
+			timer = nil
+			pending++
+			go func() {
+				var result answer
+				result.body, result.metadata, result.err = requestSubscription(ctx, tunnel, address)
+				answers <- result
+			}()
+		case result := <-answers:
+			pending--
+			if result.err == nil {
+				return result.body, result.metadata, nil
+			}
+			// Prefer what the server itself said over a network error.
+			var answerErr subscriptionAnswerError
+			if !haveFirst || errors.As(result.err, &answerErr) {
+				first, haveFirst = result, true
+			}
+			if pending == 0 && timer != nil {
+				// The direct route failed early: try the tunnel now.
+				timer = time.After(0)
+			}
+		case <-ctx.Done():
+			if haveFirst {
+				return first.body, first.metadata, first.err
+			}
+			return nil, subscriptionMetadata{}, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
+		}
+	}
+	return first.body, first.metadata, first.err
+}
+
+func requestSubscription(ctx context.Context, transport http.RoundTripper, address string) ([]byte, subscriptionMetadata, error) {
+	client := &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || r.URL.Scheme != "https" || r.URL.User != nil {
 			return errors.New("Недопустимое перенаправление")
 		}
 		return nil
 	}}
-	req, e := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if closer, ok := transport.(interface{ CloseIdleConnections() }); ok {
+		defer closer.CloseIdleConnections()
+	}
+	req, e := http.NewRequestWithContext(ctx, "GET", address, nil)
 	if e != nil {
-		return nil, 0, subscriptionMetadata{}, errors.New("Некорректная ссылка")
+		return nil, subscriptionMetadata{}, subscriptionAnswerError{"Некорректная ссылка"}
 	}
 	setClientIdentityHeaders(req, currentDeviceInfo())
 	req.Header.Set("Accept", "application/json, text/plain;q=0.9")
 	resp, e := client.Do(req)
 	if e != nil {
-		return nil, 0, subscriptionMetadata{}, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
+		return nil, subscriptionMetadata{}, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, 0, subscriptionMetadata{}, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
+		return nil, subscriptionMetadata{}, subscriptionAnswerError{fmt.Sprintf("Сервер подписки вернул HTTP %d", resp.StatusCode)}
 	}
 	metadata := subscriptionMetadataFromHeaders(resp.Header)
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if e != nil {
-		return nil, 0, metadata, errors.New("Ошибка чтения подписки")
+		return nil, metadata, errors.New("Ошибка чтения подписки")
 	}
 	if len(b) > 4*1024*1024 {
-		return nil, 0, metadata, errors.New("Подписка превышает 4 МБ")
+		return nil, metadata, subscriptionAnswerError{"Подписка превышает 4 МБ"}
 	}
-	skipped := 0
-	profiles, err := parseSubscriptionWithStats(b, &skipped)
-	return profiles, skipped, metadata, err
+	return b, metadata, nil
 }
 
 type subscriptionSourceStatus struct {

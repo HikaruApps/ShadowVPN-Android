@@ -64,9 +64,10 @@ Three layers, all in one process:
    - Exported gomobile API in `bridge.go`: `SetDataDir`, `SetDeviceSeed`, `DeviceHWID`,
      `LoadCachedProfiles`, `Configure(optionsJSON)`, `ImportSources({"urls","manual"})`,
      `PingProfiles`, `Prepare(profileID)`, `Start(tunFD)`, `StartProxy` (local proxy only, no TUN), `Stop`, `SwitchProfile(profileID)`,
-     `Reload`, `PublicIP`, `Logs`, `Diagnose(id)` (DNS + real-check step results with human reasons, `diagnose.go`), `LastWarning` (non-fatal note of the last Prepare, e.g. dropped
+     `Reload`, `PublicIP`, `Logs`, `Diagnose(id)` (DNS + real-check step results with human reasons, `diagnose.go`), `CheckWhitelist` (mobile whitelist detection: VK/ya.ru/max.ru answer, ordinary sites do not), `LastWarning` (non-fatal note of the last Prepare, e.g. dropped
      geo rules); `android_ping.go`: `PingPlan` + `PingProfile(id, method)` let Java check servers
-     one by one and stream each latency to the UI (`window.ShadowVPN.pingResult`). Java also re-checks
+     one by one and stream each latency to the UI (`window.ShadowVPN.pingResult`); a failed real check falls back to
+     a direct TCP knock (`direct`, shown grey as `~N мс`; not for UDP protocols). Java also re-checks
      2 s after the default network changes, keeps the last results for 24 h (`ping_cache`, shown
      dimmed as `cached`) and re-checks one server on a tap on its latency (`pingServer`, a second
      attempt from the 3rd second). Inner-class bridge methods must call activity methods as
@@ -81,7 +82,9 @@ Three layers, all in one process:
      instance is closed and the TUN and local proxy inbounds attached (`attachInbounds`). `SwitchProfile`,
      `Reload` (network change, Xray-only settings) and the watchdog (rebuilds after
      consecutive failed probes) all use this; a failed probe keeps the current server.
-   - Android-only files: `xrayjson.go` (Xray JSON import and sanitizing), `links.go`
+   - Android-only files: `android_net.go` (the phone's own network: system DNS with a Yandex DNS
+     fallback for servers and subscriptions, direct transport, whitelist probe; subscriptions load
+     directly first, the tunnel races in after 2 s), `xrayjson.go` (Xray JSON import and sanitizing), `links.go`
      (vmess://, ss://), `android_config.go` (turns the desktop config into the Android
      runtime config: DNS through `dns-out`, rule ordering, subscription rules, dialer
      chains, GeoData, warning-level log; no local listeners unless the opt-in local proxy is on),

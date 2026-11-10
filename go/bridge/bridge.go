@@ -312,7 +312,7 @@ var hideHWID atomic.Bool
 
 // ImportSources downloads subscription URLs and parses manually added
 // configs (Xray JSON or share links), merging them into one server list.
-// Subscriptions are fetched through the tunnel when it is up.
+// Subscriptions are fetched directly, and through the tunnel when it is up.
 func ImportSources(sourcesJSON string) (string, error) {
 	var sources importSources
 	if err := json.Unmarshal([]byte(sourcesJSON), &sources); err != nil {
@@ -386,9 +386,10 @@ func ImportSources(sourcesJSON string) (string, error) {
 	return string(result), err
 }
 
-// subscriptionTransport sends subscription requests through the running
-// tunnel first (the app's own sockets bypass the VPN), falling back to the
-// physical network.
+// subscriptionTransport sends requests through the running tunnel, or is
+// nil when the VPN is off. Xray hands back a connection before the server
+// has reached the destination, so a failure shows only in the request
+// itself; the direct route is tried separately (downloadSubscriptionBody).
 func subscriptionTransport() http.RoundTripper {
 	mobile.Lock()
 	instance := mobile.instance
@@ -396,14 +397,10 @@ func subscriptionTransport() http.RoundTripper {
 	if instance == nil {
 		return nil
 	}
-	direct := &net.Dialer{Timeout: 10 * time.Second}
 	return &http.Transport{
 		Proxy: nil,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			if conn, err := dialThroughInstance(ctx, instance, address); err == nil {
-				return conn, nil
-			}
-			return direct.DialContext(ctx, network, address)
+		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+			return dialThroughInstance(ctx, instance, address)
 		},
 		TLSHandshakeTimeout: 10 * time.Second,
 	}

@@ -160,6 +160,7 @@ button,label,select,input,textarea{touch-action:manipulation}
 .latency.good{color:var(--success)}
 .latency.medium{color:var(--warning)}
 .latency.bad{color:var(--danger)}
+.latency.direct,.ping-pill.direct{color:var(--text-2)}
 /* Во время проверки анимируется только кнопка пинга: десятки отдельных
    пульсаций на карточках съедали бы кадры на слабых устройствах. */
 .latency.pending{color:var(--text-3)}
