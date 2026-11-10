@@ -59,6 +59,11 @@ public final class ShadowVpnService extends VpnService {
     private volatile long requests;
     private volatile long cancelledUpTo;
 
+    @Override public void onCreate() {
+        super.onCreate();
+        CrashLog.install(this);
+    }
+
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
         if (STOP.equals(action)) {

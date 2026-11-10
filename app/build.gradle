@@ -13,8 +13,8 @@ android {
         applicationId = 'net.shadownet.shadowvpn.android'
         minSdk = 29
         targetSdk = 35
-        versionCode = 31
-        versionName = '0.24.1' + (buildSha ? '-' + buildSha.take(7) : '')
+        versionCode = 34
+        versionName = '0.24.4' + (buildSha ? '-' + buildSha.take(7) : '')
     }
     if (signingKeystore) {
         signingConfigs {
@@ -49,6 +49,11 @@ android {
 
 dependencies {
     implementation files('libs/shadowvpn-core.aar')
-    // QR scanner without Google Play services; depends only on zxing core.
+    // QR scanner without Google Play services. Its scanner screen checks and
+    // asks for the camera permission with androidx.core (ContextCompat,
+    // ActivityCompat), which its POM does not declare: without this line the
+    // app crashed as soon as the scanner opened. 1.6.0 is the last core
+    // release without a Kotlin runtime.
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+    implementation 'androidx.core:core:1.6.0'
 }
