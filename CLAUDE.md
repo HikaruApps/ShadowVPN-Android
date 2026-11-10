@@ -43,6 +43,8 @@ Three layers, all in one process:
    `index.html` in a desktop browser renders mock data (no `window.ShadowVpnAndroid`);
    query params `?disconnected`, `?error`, `?blocked`, `?lite`, `?preview=servers|menu|welcome|settings|
    subscriptions|logs|providers|ping|auto|connection|network|tunnel|routing|proxy|split|application|about` open specific screens.
+   Settings are five category pages (Серверы, Подключение, Сеть, Маршрутизация, Приложение), each
+   built from the `*SettingsContent()` sections; the old preview names open their category.
    Long lists (servers, apps, Auto servers) are paged in via `lazyList`; the
    `html.lite` class (low RAM/CPU devices) disables shadows and animations.
 2. **Java host** (`app/src/main/java/net/shadownet/shadowvpn/android/`)

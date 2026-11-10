@@ -1128,32 +1128,25 @@
   }
 
   // The settings are a list of categories; every row opens its own page.
+  // Five categories; each opens one page with all of its settings. Only
+  // long lists (Auto servers, apps) and the logs keep a page of their own.
   function buildSettings() {
     const body = page("Настройки");
-    body.append(
-      group("Серверы",
-        navRow("servers", "Подписки", "Ссылки, обновление и HWID", buildServerSettings),
-        navRow("ping", "Проверка серверов", "Как и когда проверять серверы", buildPingSettings),
-        navRow("auto", "Автовыбор", "Из каких серверов выбирает Auto", buildAutoSettings)),
-      group("Подключение",
-        navRow("connection", "Подключение и защита", "Автоподключение и Kill Switch", buildConnectionSettings)),
-      group("Обход блокировок",
-        navRow("tunnel", "Фрагментация и мультиплексирование", "Помогает против DPI", buildTunnelSettings)),
-      group("Сеть",
-        navRow("globe", "DNS и сеть", "DNS, IPv6, MTU и локальная сеть", buildNetworkSettings),
-        navRow("proxy", "Локальный прокси", "SOCKS5 и HTTP, доступ по хотспоту", buildProxySettings)),
-      group("Маршрутизация",
-        navRow("routing", "Правила маршрутизации", "Что идёт через VPN, а что напрямую", buildRoutingSettings),
-        navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling)),
-      group("Приложение",
-        navRow("application", "Работа приложения", "Фон и память", buildApplicationSettings),
-        navRow("logs", "Логи", "События приложения и ядра", () => buildLogs(true)),
-        navRow("about", "О приложении", `Версия ${snapshot.appVersion || "—"}`, buildAbout)));
+    body.append(group(null,
+      navRow("servers", "Серверы", "Подписки, проверка и автовыбор", buildServerSettings),
+      navRow("connection", "Подключение", "Автоподключение, Kill Switch и обход блокировок", buildConnectionSettings),
+      navRow("globe", "Сеть", "DNS, IPv6, MTU и локальный прокси", buildNetworkSettings),
+      navRow("routing", "Маршрутизация", "Правила и приложения через VPN", buildRoutingSettings),
+      navRow("application", "Приложение", `Фон, память, логи · версия ${snapshot.appVersion || "—"}`, buildApplicationSettings)));
   }
 
   function buildServerSettings() {
-    const body = page("Подписки", () => buildSettings());
-    body.append(serverSettingsContent());
+    const body = page("Серверы", () => buildSettings());
+    body.append(
+      serverSettingsContent(),
+      pingSettingsContent(),
+      group("Автовыбор",
+        navRow("auto", "Серверы для Auto", "Из каких серверов выбирает Auto", buildAutoSettings)));
   }
 
   function serverSettingsContent() {
@@ -1180,10 +1173,7 @@
     return fragment;
   }
 
-  function buildPingSettings() {
-    const body = page("Проверка серверов", () => buildSettings());
-    body.append(pingSettingsContent());
-  }
+  const buildPingSettings = () => buildServerSettings();
 
   function pingSettingsContent() {
     const fragment = document.createDocumentFragment();
@@ -1212,7 +1202,7 @@
   }
 
   function buildAutoSettings() {
-    const body = page("Автовыбор", () => buildSettings());
+    const body = page("Автовыбор", () => buildServerSettings());
     body.append(autoSettingsContent());
   }
 
@@ -1244,8 +1234,8 @@
   }
 
   function buildConnectionSettings() {
-    const body = page("Подключение и защита", () => buildSettings());
-    body.append(connectionSettingsContent());
+    const body = page("Подключение", () => buildSettings());
+    body.append(connectionSettingsContent(), tunnelSettingsContent());
   }
 
   function connectionSettingsContent() {
@@ -1269,8 +1259,8 @@
   }
 
   function buildNetworkSettings() {
-    const body = page("DNS и сеть", () => buildSettings());
-    body.append(networkSettingsContent());
+    const body = page("Сеть", () => buildSettings());
+    body.append(networkSettingsContent(), proxySettingsContent());
   }
 
   function networkSettingsContent() {
@@ -1326,7 +1316,10 @@
 
   function buildRoutingSettings() {
     const body = page("Маршрутизация", () => buildSettings());
-    body.append(routingSettingsContent());
+    body.append(
+      group("Приложения",
+        navRow("split", "Раздельное туннелирование", "Какие приложения идут через VPN", buildSplitTunneling)),
+      routingSettingsContent());
   }
 
   // What a rule matches, in words.
@@ -1476,7 +1469,7 @@
   }
 
   function buildSplitTunneling() {
-    const body = page("Раздельное туннелирование", () => buildSettings());
+    const body = page("Раздельное туннелирование", () => buildRoutingSettings());
     body.append(splitTunnelingContent());
   }
 
@@ -1569,27 +1562,21 @@
     return fragment;
   }
 
-  function buildTunnelSettings() {
-    const body = page("Обход блокировок", () => buildSettings());
-    body.append(tunnelSettingsContent());
-  }
+  const buildTunnelSettings = () => buildConnectionSettings();
 
   function tunnelSettingsContent() {
     const fragment = document.createDocumentFragment();
     const s = snapshot.settings || {};
     const fragmentation = switchControl(!!s.fragmentation);
     const mux = switchControl(!!s.mux);
-    fragment.append(group("Протокол",
+    fragment.append(group("Обход блокировок",
       row("Фрагментация TLS", "Делит ClientHello, помогает против DPI", fragmentation),
       row("Мультиплексирование", "Mux: несколько соединений в одном. Не для Vision и XHTTP", mux)));
     fragment.append(saveActions(() => ({ fragmentation: isOn(fragmentation), mux: isOn(mux) })));
     return fragment;
   }
 
-  function buildProxySettings() {
-    const body = page("Локальный прокси", () => buildSettings());
-    body.append(proxySettingsContent());
-  }
+  const buildProxySettings = () => buildNetworkSettings();
 
   function proxySettingsContent() {
     const fragment = document.createDocumentFragment();
@@ -1611,12 +1598,12 @@
     const httpPort = portField(s.proxyHttpPort, "10809");
     fragment.append(
       el("p", "group-note", "Другие приложения на телефоне видят открытые порты, поэтому прокси работает только с логином и паролем."),
-      group("Прокси",
+      group("Локальный прокси",
         row("SOCKS5-прокси", "Через то же подключение, что и VPN", enabled),
         row("Порт SOCKS5", null, socksPort),
         row("HTTP-прокси", "Для приложений без поддержки SOCKS5", http),
         row("Порт HTTP", null, httpPort)),
-      group("Доступ",
+      group("Доступ к прокси",
         row("Доступ через хотспот", "Для устройств в вашей Wi-Fi-сети или точке доступа. UDP только на самом телефоне", lan)));
 
     const address = el("small", "mono");
@@ -1629,12 +1616,12 @@
     };
     const addressRow = row("Адрес", null);
     addressRow.querySelector(".row-copy").append(address);
-    fragment.append(group("Подключение",
+    fragment.append(group("Данные для подключения к прокси",
       addressRow,
       credentialRow("Логин", user, () => snapshot.settings?.proxyUser),
       credentialRow("Пароль", pass, () => snapshot.settings?.proxyPass)));
     fragment.append(actions(button("Сбросить логин и пароль", "secondary", () => native.resetProxyCredentials())));
-    fragment.append(group("Режим",
+    fragment.append(group("Режим прокси",
       row("Только прокси, без VPN", "Без туннеля и значка VPN: прокси нужно указать в приложениях вручную", only)));
 
     refreshProxy = settings => {
@@ -1658,8 +1645,12 @@
   }
 
   function buildApplicationSettings() {
-    const body = page("Работа приложения", () => buildSettings());
-    body.append(applicationSettingsContent());
+    const body = page("Приложение", () => buildSettings());
+    body.append(
+      applicationSettingsContent(),
+      group("Сведения",
+        navRow("logs", "Логи", "События приложения и ядра", () => buildLogs(true)),
+        navRow("about", "О приложении", `Версия ${snapshot.appVersion || "—"}`, buildAbout)));
   }
 
   function applicationSettingsContent() {
@@ -1686,7 +1677,7 @@
   }
 
   function buildAbout() {
-    const body = page("О приложении", () => buildSettings());
+    const body = page("О приложении", () => buildApplicationSettings());
     body.append(aboutContent());
   }
 
@@ -1837,7 +1828,7 @@
   }
 
   function buildLogs(fromSettings = false) {
-    const body = page("Логи", fromSettings ? () => buildSettings() : null);
+    const body = page("Логи", fromSettings ? () => buildApplicationSettings() : null);
     const log = el("pre", "log-box", native.getLogs() || "Событий пока нет");
     body.append(log, actions(button("Копировать", "secondary", () => native.copyText(log.textContent))));
   }
