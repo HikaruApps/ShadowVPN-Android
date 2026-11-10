@@ -751,7 +751,7 @@ public final class MainActivity extends Activity {
                 PingResult result = future.get();
                 known.put(result.id, result.data);
                 List<PingDelta> deltas = new ArrayList<>();
-                deltas.add(new PingDelta(result.id, result.data.latency, result.data.available));
+                deltas.add(new PingDelta(result.id, result.data));
                 for (PingGroup group : groups) {
                     addAggregateDelta(aggregateState, deltas, group.id,
                             aggregateForGroup(group, known));
@@ -776,7 +776,7 @@ public final class MainActivity extends Activity {
         try {
             JSONObject result = new JSONObject(Bridge.pingProfile(host.id, method));
             data = new PingData(result.optLong("latencyMs", 0),
-                    result.optBoolean("available", false));
+                    result.optBoolean("available", false), result.optBoolean("direct", false));
         } catch (Exception error) {
             // A missing or broken host is an unavailable result, not a failed run.
             data = new PingData(0, false);
@@ -821,32 +821,40 @@ public final class MainActivity extends Activity {
     }
 
     private PingData aggregateForGroup(PingGroup group, Map<String, PingData> known) {
-        long fastest = Long.MAX_VALUE;
-        boolean available = false;
-        for (String member : group.members) {
-            PingData data = known.get(member);
-            if (data != null && data.available) {
-                available = true;
-                fastest = Math.min(fastest, data.latency);
+        List<PingData> members = new ArrayList<>();
+        for (String member : group.members) members.add(known.get(member));
+        return fastestOf(members);
+    }
+
+    /**
+     * The fastest server that passed the check; only when none did, the
+     * fastest that at least answered directly, marked as such.
+     */
+    private static PingData fastestOf(List<PingData> results) {
+        PingData verified = null;
+        PingData direct = null;
+        for (PingData data : results) {
+            if (data == null || !data.available) continue;
+            if (!data.direct) {
+                if (verified == null || data.latency < verified.latency) verified = data;
+            } else if (direct == null || data.latency < direct.latency) {
+                direct = data;
             }
         }
-        return available ? new PingData(fastest, true) : new PingData(0, false);
+        if (verified != null) return new PingData(verified.latency, true);
+        if (direct != null) return new PingData(direct.latency, true, true);
+        return new PingData(0, false);
     }
 
     private PingData aggregateForHosts(List<PingHost> hosts, Map<String, PingData> known,
                                        boolean withoutRussian) {
-        long fastest = Long.MAX_VALUE;
-        boolean available = false;
+        List<PingData> members = new ArrayList<>();
         for (PingHost host : hosts) {
             if ("naive".equalsIgnoreCase(host.protocol)) continue;
             if (withoutRussian && host.russian) continue;
-            PingData data = known.get(host.id);
-            if (data != null && data.available) {
-                available = true;
-                fastest = Math.min(fastest, data.latency);
-            }
+            members.add(known.get(host.id));
         }
-        return available ? new PingData(fastest, true) : new PingData(0, false);
+        return fastestOf(members);
     }
 
     private void addAggregateDelta(Map<String, PingData> state, List<PingDelta> deltas,
@@ -854,14 +862,14 @@ public final class MainActivity extends Activity {
         if (id.isEmpty()) return;
         PingData previous = state.get(id);
         if (previous != null && previous.latency == value.latency
-                && previous.available == value.available) return;
+                && previous.available == value.available && previous.direct == value.direct) return;
         state.put(id, value);
-        deltas.add(new PingDelta(id, value.latency, value.available));
+        deltas.add(new PingDelta(id, value));
     }
 
     private void applyPingUpdate(List<PingDelta> deltas) {
         for (PingDelta delta : deltas) {
-            pingResults.put(delta.id, new PingData(delta.latency, delta.available));
+            pingResults.put(delta.id, delta.data);
             pendingPingDeltas.add(delta);
         }
         schedulePingFlush();
@@ -882,8 +890,9 @@ public final class MainActivity extends Activity {
         for (PingDelta delta : pendingPingDeltas) {
             script.append("window.ShadowVPN&&window.ShadowVPN.pingResult({")
                     .append("\"id\":").append(JSONObject.quote(delta.id))
-                    .append(",\"latency\":").append(delta.latency)
-                    .append(",\"available\":").append(delta.available)
+                    .append(",\"latency\":").append(delta.data.latency)
+                    .append(",\"available\":").append(delta.data.available)
+                    .append(",\"direct\":").append(delta.data.direct)
                     .append(",\"cached\":").append(delta.cached)
                     .append("});");
         }
@@ -893,8 +902,7 @@ public final class MainActivity extends Activity {
 
     private void requeuePingResults() {
         for (Map.Entry<String, PingData> entry : pingResults.entrySet()) {
-            pendingPingDeltas.add(new PingDelta(entry.getKey(),
-                    entry.getValue().latency, entry.getValue().available, pingResultsCached));
+            pendingPingDeltas.add(new PingDelta(entry.getKey(), entry.getValue(), pingResultsCached));
         }
         schedulePingFlush();
     }
@@ -908,13 +916,19 @@ public final class MainActivity extends Activity {
             String[] network = networkState();
             diagnosticStep("network", network[0], network[1]);
             if (!"ok".equals(network[0])) {
+                diagnosticStep("whitelist", "skip", "Пропущено: нет сети");
                 diagnosticStep("dns", "skip", "Пропущено: нет сети");
                 diagnosticStep("server", "skip", "Пропущено: нет сети");
                 diagnosticStep("vpn", "skip", "Пропущено: нет сети");
                 return;
             }
+            diagnosticStep("whitelist", "running", "");
             diagnosticStep("dns", "running", "");
             diagnosticStep("server", "running", "");
+            // Both checks go over the phone's own network, so they run side
+            // by side; the whitelist answer is ready within 8 seconds.
+            Thread whitelist = new Thread(this::diagnoseWhitelist, "diagnostics-whitelist");
+            whitelist.start();
             try {
                 JSONObject result = new JSONObject(Bridge.diagnose(profileId));
                 JSONObject dns = result.getJSONObject("dns");
@@ -925,6 +939,11 @@ public final class MainActivity extends Activity {
             } catch (Exception error) {
                 diagnosticStep("dns", "fail", cleanError(error));
                 diagnosticStep("server", "skip", "Пропущено");
+            }
+            try {
+                whitelist.join();
+            } catch (InterruptedException interrupted) {
+                return;
             }
             if (!ShadowVpnService.connected) {
                 diagnosticStep("vpn", "skip", "VPN не подключён: подключитесь и запустите проверку снова");
@@ -937,6 +956,26 @@ public final class MainActivity extends Activity {
                 diagnosticStep("vpn", "fail", "Не работает: " + maskIps(cleanError(error)));
             }
         });
+    }
+
+    /**
+     * Mobile whitelists: VK, Yandex and MAX open while ordinary sites do not.
+     * "fail" here means the network looks restricted, not that the check broke.
+     */
+    private void diagnoseWhitelist() {
+        try {
+            JSONObject result = new JSONObject(Bridge.checkWhitelist());
+            if (result.optBoolean("whitelist")) {
+                diagnosticStep("whitelist", "fail", "Похоже на белые списки: открываются VK, Яндекс и MAX, "
+                        + "а обычные сайты нет. Работают только серверы, которые обходят белые списки");
+            } else if (result.optBoolean("offline")) {
+                diagnosticStep("whitelist", "skip", "Не удалось проверить: сайты не отвечают");
+            } else {
+                diagnosticStep("whitelist", "ok", "Не обнаружены · обычные сайты открываются");
+            }
+        } catch (Exception error) {
+            diagnosticStep("whitelist", "skip", "Не удалось проверить");
+        }
     }
 
     /** {state, detail} of the phone's own network, outside the VPN. */
@@ -983,7 +1022,8 @@ public final class MainActivity extends Activity {
             JSONObject results = new JSONObject();
             for (Map.Entry<String, PingData> entry : pingResults.entrySet()) {
                 results.put(entry.getKey(), new JSONArray()
-                        .put(entry.getValue().latency).put(entry.getValue().available));
+                        .put(entry.getValue().latency).put(entry.getValue().available)
+                        .put(entry.getValue().direct));
             }
             JSONObject cache = new JSONObject()
                     .put("at", System.currentTimeMillis())
@@ -1005,7 +1045,7 @@ public final class MainActivity extends Activity {
             for (java.util.Iterator<String> keys = results.keys(); keys.hasNext(); ) {
                 String id = keys.next();
                 JSONArray value = results.getJSONArray(id);
-                pingResults.put(id, new PingData(value.optLong(0), value.optBoolean(1)));
+                pingResults.put(id, new PingData(value.optLong(0), value.optBoolean(1), value.optBoolean(2)));
             }
             pingResultsCached = !pingResults.isEmpty();
             requeuePingResults();
@@ -1037,7 +1077,7 @@ public final class MainActivity extends Activity {
             ui.post(() -> {
                 pingResults.put(answer.id, answer.data);
                 List<PingDelta> update = new ArrayList<>();
-                update.add(new PingDelta(answer.id, answer.data.latency, answer.data.available));
+                update.add(new PingDelta(answer.id, answer.data));
                 applyPingUpdate(update);
             });
         });
@@ -2117,19 +2157,17 @@ public final class MainActivity extends Activity {
 
     private static final class PingDelta {
         final String id;
-        final long latency;
-        final boolean available;
+        final PingData data;
         /** Restored from the last run rather than measured now. */
         final boolean cached;
 
-        PingDelta(String id, long latency, boolean available) {
-            this(id, latency, available, false);
+        PingDelta(String id, PingData data) {
+            this(id, data, false);
         }
 
-        PingDelta(String id, long latency, boolean available, boolean cached) {
+        PingDelta(String id, PingData data, boolean cached) {
             this.id = id;
-            this.latency = latency;
-            this.available = available;
+            this.data = data;
             this.cached = cached;
         }
     }
@@ -2137,10 +2175,17 @@ public final class MainActivity extends Activity {
     private static final class PingData {
         final long latency;
         final boolean available;
+        /** Only the server's port answered; the check through it did not pass. */
+        final boolean direct;
 
         PingData(long latency, boolean available) {
+            this(latency, available, false);
+        }
+
+        PingData(long latency, boolean available, boolean direct) {
             this.latency = available ? Math.max(0, latency) : 0;
             this.available = available;
+            this.direct = available && direct;
         }
     }
 

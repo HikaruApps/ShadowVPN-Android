@@ -188,6 +188,9 @@
     // Restored from the last run: shown, but dimmed until checked again.
     const cached = server.cached ? " cached" : "";
     if (!server.available) return { text: "—", cls: `bad${cached}` };
+    // Only the server's port answered over the phone's network (e.g. under
+    // mobile whitelists); the check through the server did not pass.
+    if (server.direct) return { text: `~${server.latency} мс`, cls: `direct${cached}` };
     return { text: `${server.latency} мс`, cls: (server.latency < 180 ? "good" : server.latency < 450 ? "medium" : "bad") + cached };
   }
 
@@ -408,6 +411,7 @@
     server.latency = item.latency;
     server.available = item.available;
     server.cached = !!item.cached;
+    server.direct = !!item.direct;
     server.checking = false;
     cardsDirty = true;
     const card = serverCards.get(item.id);
@@ -482,6 +486,7 @@
       delete server.latency;
       delete server.available;
       delete server.cached;
+      delete server.direct;
       delete server.checking;
     }
     cardsDirty = true;
@@ -1185,7 +1190,7 @@
     const s = snapshot.settings || {};
     const method = selectControl([["real","Полная"],["tcp","Быстрая"]], s.pingMethod === "tcp" ? "tcp" : "real");
     const methodHint = {
-      real: "Запрос идёт через сам сервер: рабочим считается только тот, через который открываются сайты",
+      real: "Запрос идёт через сам сервер: рабочим считается только тот, через который открываются сайты. Серая задержка с «~»: сервер отвечает напрямую, но проверка через него не прошла (бывает при белых списках)",
       tcp: "Проверяет лишь, что порт открыт. Быстро, но сломанный сервер может выглядеть рабочим"
     };
     const methodRow = row("Способ", null, method);
@@ -1754,6 +1759,7 @@
   let diagnosticsVerdict = null;
   const DIAGNOSTIC_STEPS = [
     ["network", "Сеть телефона", "Есть ли интернет без VPN"],
+    ["whitelist", "Белые списки", "Не ограничил ли оператор интернет разрешёнными сайтами"],
     ["dns", "Адрес сервера", "Находится ли сервер по имени"],
     ["server", "Доступность сервера", "Проходит ли трафик через сервер"],
     ["vpn", "Интернет через VPN", "Работает ли подключённый туннель"]
@@ -1805,8 +1811,12 @@
     const busy = DIAGNOSTIC_STEPS.some(([id]) => ["wait", "running"].includes(state(id)));
     let tone = "busy", title = "Проверяем…", note = "Это займёт до 10 секунд";
     if (!busy) {
+      const whitelist = state("whitelist") === "fail";
       if (state("network") === "fail") {
         tone = "fail"; title = "Нет интернета"; note = "Телефон не в сети: проверьте Wi-Fi или мобильные данные";
+      } else if (whitelist && (state("dns") === "fail" || state("server") === "fail")) {
+        tone = "fail"; title = "Похоже, включены белые списки";
+        note = "Оператор пропускает только разрешённые сайты (VK, Яндекс, MAX). Выберите сервер, который работает при белых списках, или подключитесь к Wi-Fi";
       } else if (state("dns") === "fail") {
         tone = "fail"; title = "Сервер не найден"; note = "Сеть не может найти адрес сервера. Смените сеть или DNS, или обновите подписку";
       } else if (state("server") === "fail") {
@@ -1815,7 +1825,8 @@
         tone = "fail"; title = "VPN не пропускает интернет"; note = "Сервер доступен, но туннель не работает. Переподключитесь";
       } else if (state("server") === "ok") {
         tone = "ok"; title = "Сервер доступен";
-        note = state("vpn") === "ok" ? "Всё работает: интернет идёт через VPN" : "Можно подключаться";
+        note = whitelist ? "Включены белые списки, но этот сервер через них проходит"
+          : state("vpn") === "ok" ? "Всё работает: интернет идёт через VPN" : "Можно подключаться";
       } else {
         tone = "ok"; title = "Сеть работает"; note = "Выберите сервер, чтобы проверить его";
       }
@@ -2018,7 +2029,8 @@
     openPanel(preview);
     ({ settings:buildSettings, subscriptions:buildSubscriptions, logs:buildLogs, diagnostics:buildDiagnostics })[preview]();
     if (preview === "diagnostics") {
-      diagnosticsStep({ id:"network", state:"ok", detail:"Wi-Fi · интернет есть" });
+      diagnosticsStep({ id:"network", state:"ok", detail:"Мобильная сеть · интернет есть" });
+      diagnosticsStep({ id:"whitelist", state:"fail", detail:"Похоже на белые списки: открываются VK, Яндекс и MAX, а обычные сайты нет. Работают только серверы, которые обходят белые списки" });
       diagnosticsStep({ id:"dns", state:"ok", detail:"Найден · de.example.com → 203.0.*.*" });
       diagnosticsStep({ id:"server", state:"fail", detail:"Недоступен: сервер обрывает соединение. Обычно это неверный ключ или истёкшая подписка" });
       diagnosticsStep({ id:"vpn", state:"skip", detail:"VPN не подключён: подключитесь и запустите проверку снова" });
