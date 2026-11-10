@@ -319,10 +319,18 @@ public final class MainActivity extends Activity {
 
     private void scanQr() {
         new com.google.zxing.integration.android.IntentIntegrator(this)
+                .setCaptureActivity(QrScanActivity.class)
                 .setDesiredBarcodeFormats(com.google.zxing.integration.android.IntentIntegrator.QR_CODE)
                 .setPrompt("Наведите камеру на QR-код подписки")
                 .setBeepEnabled(false)
                 .setOrientationLocked(true)
+                // Light codes on a dark background too: subscription pages in
+                // a dark theme show them that way.
+                .addExtra(com.google.zxing.client.android.Intents.Scan.SCAN_TYPE,
+                        com.google.zxing.client.android.Intents.Scan.MIXED_SCAN)
+                // Read as DecodeHintType.TRY_HARDER: slower per frame, finds
+                // small or slightly blurred codes.
+                .addExtra("TRY_HARDER", true)
                 .initiateScan();
     }
 
