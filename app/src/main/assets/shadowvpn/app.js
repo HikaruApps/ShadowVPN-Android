@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id);
   const hasNativeBridge = !!window.ShadowVpnAndroid;
   const native = window.ShadowVpnAndroid || {
-    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {}, scanQr() {}, runDiagnostics() {},
+    ready() {}, toggleVpn() {}, selectServer() {}, refreshSubscriptions() {}, pingServers() {}, pingServer() {}, scanQr() {}, scanQrImage() {}, runDiagnostics() {},
     saveSubscriptions() {}, saveSettings() {}, getLogs() { return ""; }, copyText() {}, openVpnSettings() {},
     getInstalledApps() { return '{"apps":[]}'; }, requestInstalledApps() {}, requestAppIcon() {}, openBatterySettings() {}, resetProxyCredentials() {}
   };
@@ -1728,7 +1728,9 @@
     const manualRow = row("Свои конфигурации", "Xray JSON или ссылки vless, vmess, trojan, ss, hy2, naive", manual);
     manualRow.classList.add("stack");
     body.append(group("Вручную", manualRow));
-    body.append(actions(button("Сканировать QR-код", "secondary", () => native.scanQr())));
+    body.append(actions(
+      button("Сканировать QR-код", "secondary", () => native.scanQr()),
+      button("QR-код из галереи", "secondary", () => native.scanQrImage())));
     body.append(actions(
       button("Сохранить и обновить", "primary", () => {
         const working = { wifi: wifi.input.value.trim(), lte: lte.input.value.trim(), manual: manual.value.trim() };
@@ -1851,7 +1853,7 @@
     closeOffer();
     let host = offer.url;
     try { host = new URL(offer.url).host; } catch (_) {}
-    const sourceText = { link: "Ссылка из браузера", clipboard: "Скопировано в буфер обмена", qr: "Из QR-кода" }[offer.source] || "";
+    const sourceText = { link: "Ссылка из браузера", clipboard: "Скопировано в буфер обмена", qr: "Из QR-кода", "qr-image": "Из QR-кода на картинке" }[offer.source] || "";
     const slots = snapshot.subscriptions || { wifi: "", lte: "", manual: "" };
     const save = slot => {
       const working = { wifi: slots.wifi || "", lte: slots.lte || "", manual: slots.manual || "", [slot]: offer.url };
@@ -1898,6 +1900,7 @@
 
   $("powerButton").addEventListener("click", () => native.toggleVpn());
   $("welcomeScan").addEventListener("click", () => native.scanQr());
+  $("welcomeGallery").addEventListener("click", () => native.scanQrImage());
   $("pingPill").addEventListener("click", () => {
     const id = snapshot.selectedId;
     const server = id ? serverModels.get(id) : null;

@@ -77,7 +77,8 @@ Three layers, all in one process:
      `MainActivity.this.x(...)`: a bare `x(...)` with the same name calls the bridge itself. Subscriptions
      from outside (`shadowvpn://import/<https url>` deep link, clipboard on focus, QR via
      zxing-android-embedded, whose scanner needs `androidx.core` although its POM omits it, hence that
-     dependency and `android.useAndroidX`; `QrScanActivity` adds continuous focus, inverted codes, TRY_HARDER) always go through `window.ShadowVPN.offerSubscription` for the user
+     dependency and `android.useAndroidX`; `QrScanActivity` adds continuous focus, inverted codes, TRY_HARDER;
+     `QrImage` reads a QR code from a picture picked in the system photo picker) always go through `window.ShadowVPN.offerSubscription` for the user
      to confirm; nothing is added silently. Data
      crosses the boundary as JSON strings; global state lives in the mutex-guarded `mobile`
      struct. Only types gomobile supports may appear in exported signatures.

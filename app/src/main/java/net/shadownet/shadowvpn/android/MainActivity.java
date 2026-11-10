@@ -338,10 +338,47 @@ public final class MainActivity extends Activity {
         com.google.zxing.integration.android.IntentResult result =
                 com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(resultCode, data);
         if (result == null || result.getContents() == null) return;
-        String value = result.getContents().trim();
+        handleQrValue(result.getContents(), "qr");
+    }
+
+    private void handleQrValue(String contents, String source) {
+        String value = contents.trim();
         String url = value.startsWith("shadowvpn://") ? subscriptionFromLink(value) : value;
-        if (isHttpsLink(url)) offerSubscription(url, "qr");
+        if (isHttpsLink(url)) offerSubscription(url, source);
         else showMessage("В QR-коде нет HTTPS-ссылки на подписку");
+    }
+
+    private static final int QR_IMAGE_REQUEST = 104;
+
+    /** A QR code from a picture: the system photo picker, no storage permission. */
+    private void scanQrImage() {
+        Intent pick = Build.VERSION.SDK_INT >= 33
+                ? new Intent(android.provider.MediaStore.ACTION_PICK_IMAGES)
+                : new Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE);
+        pick.setType("image/*");
+        try {
+            startActivityForResult(pick, QR_IMAGE_REQUEST);
+        } catch (android.content.ActivityNotFoundException missing) {
+            try {
+                startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT)
+                        .addCategory(Intent.CATEGORY_OPENABLE).setType("image/*"), QR_IMAGE_REQUEST);
+            } catch (android.content.ActivityNotFoundException none) {
+                showMessage("Нет приложения для выбора картинок");
+            }
+        }
+    }
+
+    private void handleQrImage(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri image = data.getData();
+        showMessage("Ищем QR-код на картинке…");
+        new Thread(() -> {
+            String text = QrImage.decode(getApplicationContext(), image);
+            ui.post(() -> {
+                if (text == null) showMessage("На картинке не найден QR-код");
+                else handleQrValue(text, "qr-image");
+            });
+        }, "qr-image").start();
     }
 
     private void setupWebView() {
@@ -1134,6 +1171,7 @@ public final class MainActivity extends Activity {
         super.onActivityResult(request, result, data);
         if (request == VPN_REQUEST && result == RESULT_OK) startSelectedServer();
         if (request == QR_REQUEST) handleQrResult(result, data);
+        if (request == QR_IMAGE_REQUEST) handleQrImage(result, data);
         if (request == VPN_SHORTCUT_REQUEST && result == RESULT_OK) VpnControl.connect(this);
     }
 
@@ -1759,6 +1797,7 @@ public final class MainActivity extends Activity {
         }
 
         @JavascriptInterface public void scanQr() { ui.post(MainActivity.this::scanQr); }
+        @JavascriptInterface public void scanQrImage() { ui.post(MainActivity.this::scanQrImage); }
         @JavascriptInterface public void runDiagnostics() { ui.post(MainActivity.this::runDiagnostics); }
         @JavascriptInterface public void pingServers() { ui.post(MainActivity.this::runPings); }
         // Qualified, or the call would resolve to this bridge method itself.
