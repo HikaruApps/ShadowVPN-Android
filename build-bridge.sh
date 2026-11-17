@@ -16,6 +16,9 @@ if [[ -z "${ANDROID_HOME:-}" || ! -d "$ANDROID_HOME/ndk/$ndk_version" ]]; then
   echo "Using Android NDK $ndk_version" >&2
 fi
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ndk_version"
+# cronet-go links Cronet with "-l:libcronet.a", which Go 1.27.4 and later
+# reject in #cgo LDFLAGS unless it is allowed explicitly.
+export CGO_LDFLAGS_ALLOW="${CGO_LDFLAGS_ALLOW:+$CGO_LDFLAGS_ALLOW|}-l:libcronet\.a"
 trap 'rm -rf "$out"' EXIT
 cp go/go.mod go/go.sum "$out/"
 mkdir -p "$out/bridge" "$out/third_party" app/libs

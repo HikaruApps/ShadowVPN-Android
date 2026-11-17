@@ -27,7 +27,8 @@ cd go && go test ./bridge -run TestParseNaiveHTTPSURI   # single test
 - The AAR must exist before Gradle can compile the app; it is generated and git-ignored.
 - `build-bridge.sh` copies `go.mod`, `go.sum`, `bridge/*.go` and `third_party/utls`
   into a temp dir and binds there. `-ldflags=-checklinkname=0` is required (Xray's
-  transitive dep `github.com/wlynxg/anet`).
+  transitive dep `github.com/wlynxg/anet`), and so is `CGO_LDFLAGS_ALLOW='-l:libcronet\.a'`
+  (Go 1.27.4+ rejects cronet-go's `-l:libcronet.a` link flag otherwise); both scripts set it.
 - CI (`.github/workflows/android.yml`) runs bridge build → `go test ./...` →
   `assembleRelease` on every push/PR and uploads `ShadowVPN-Android` (`app-release.apk`). Publishing
   a GitHub release builds its tag and attaches `ShadowVPN-<version>.apk` to it; a manual run

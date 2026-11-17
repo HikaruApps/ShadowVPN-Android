@@ -18,6 +18,9 @@ if (-not (Test-Path -LiteralPath $ndkDirectory -PathType Container)) {
     Write-Host "Using Android NDK $ndkVersion"
 }
 $env:ANDROID_NDK_HOME = $ndkDirectory
+# cronet-go links Cronet with "-l:libcronet.a", which Go 1.27.4 and later
+# reject in #cgo LDFLAGS unless it is allowed explicitly.
+$env:CGO_LDFLAGS_ALLOW = if ($env:CGO_LDFLAGS_ALLOW) { "$($env:CGO_LDFLAGS_ALLOW)|-l:libcronet\.a" } else { '-l:libcronet\.a' }
 $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $temporaryDirectory = Join-Path $temporaryRoot ('shadowvpn-android-' + [guid]::NewGuid().ToString('N'))
 
