@@ -3,6 +3,8 @@ package bridge
 import (
 	"context"
 	"errors"
+	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -171,4 +173,130 @@ func chainThrough(profile, relay Profile, fragmentation bool) (Profile, error) {
 	direct.outbound = outbound
 	direct.chain = chain
 	return direct, nil
+}
+
+// Server checks with the chain on go through the relay as well, so a
+// latency shows whether the server is reachable from the Russian one.
+
+// checkRelay remembers the relay picked for checks for a minute: a check of
+// the whole list asks for it once per server.
+var checkRelay struct {
+	sync.Mutex
+	key    string
+	until  time.Time
+	relay  Profile
+	ok     bool
+	reason string
+}
+
+const checkRelayLifetime = time.Minute
+
+// relayForChecks is pickRelay, shared by the checks of one run.
+func relayForChecks(profiles []Profile, options *relayOptions) (Profile, bool, string) {
+	if options == nil {
+		return Profile{}, false, ""
+	}
+	key := options.ProfileID + "|" + strconv.Itoa(len(profiles))
+	checkRelay.Lock()
+	defer checkRelay.Unlock()
+	if checkRelay.key == key && time.Now().Before(checkRelay.until) {
+		return checkRelay.relay, checkRelay.ok, checkRelay.reason
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	relay, ok, reason := pickRelay(ctx, profiles, options)
+	checkRelay.key, checkRelay.until = key, time.Now().Add(checkRelayLifetime)
+	checkRelay.relay, checkRelay.ok, checkRelay.reason = relay, ok, reason
+	return relay, ok, reason
+}
+
+// realPingThroughRelay is the real check of profile reached through relay.
+// A probe cannot use sockopt.dialerProxy: Xray resolves it through its one
+// process-wide dialer state, so probes could only run one at a time. Instead
+// the probe instance gets a loopback forward (dokodemo-door) to the server
+// that leaves through the relay, and the server's outbound connects to it.
+// The server's TLS name stays the original one.
+func realPingThroughRelay(parent context.Context, profile, relay Profile, fragmentation bool) (int64, error) {
+	ctx, cancel := context.WithTimeout(parent, realPingTimeout)
+	defer cancel()
+	resolved, _, err := resolveProfileEndpoint(ctx, profile)
+	if err != nil {
+		return 0, err
+	}
+	probe, _, err := withoutDialerChain(resolved)
+	if err != nil {
+		return 0, err
+	}
+	port, err := freeLoopbackPort()
+	if err != nil {
+		return 0, err
+	}
+	server, err := configuredOutbound(probe, "proxy", false)
+	if err != nil {
+		return 0, err
+	}
+	if !replaceOutboundEndpoint(server, "127.0.0.1") || !replaceOutboundPort(server, port) {
+		return 0, errors.New("не удалось направить проверку через российский сервер")
+	}
+	// A server addressed by IP had no TLS name: keep checking it against
+	// that IP, not against the loopback address.
+	if stream, ok := server["streamSettings"].(map[string]any); ok && stringValue(stream["security"]) == "tls" {
+		setStringIfEmpty(stream, "tlsSettings", "serverName", resolved.address)
+	}
+	relayProbe, relayChained, err := withoutDialerChain(relay)
+	if err != nil {
+		return 0, err
+	}
+	relayOutbound, err := configuredOutbound(relayProbe, relayTag, fragmentation || relayChained)
+	if err != nil {
+		return 0, err
+	}
+	return measureProbeConfig(ctx, map[string]any{
+		"log": map[string]any{"loglevel": "none"},
+		"inbounds": []any{map[string]any{
+			"tag": "relay-in", "listen": "127.0.0.1", "port": port, "protocol": "dokodemo-door",
+			"settings": map[string]any{"address": resolved.address, "port": resolved.port, "network": "tcp"},
+		}},
+		// The server's outbound comes first: requests of the check use it.
+		"outbounds": []any{server, relayOutbound},
+		"routing": map[string]any{"rules": []any{map[string]any{
+			"type": "field", "inboundTag": []string{"relay-in"}, "outboundTag": relayTag,
+		}}},
+	})
+}
+
+func freeLoopbackPort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	return port, nil
+}
+
+// replaceOutboundPort sets the server port the way replaceOutboundEndpoint
+// sets its address.
+func replaceOutboundPort(outbound map[string]any, port int) bool {
+	settings, _ := outbound["settings"].(map[string]any)
+	if settings == nil {
+		return false
+	}
+	if stringValue(settings["address"]) != "" {
+		settings["port"] = port
+		return true
+	}
+	for _, key := range []string{"vnext", "servers"} {
+		servers, _ := settings[key].([]any)
+		if len(servers) == 0 {
+			continue
+		}
+		server, _ := servers[0].(map[string]any)
+		if server == nil {
+			return false
+		}
+		server["port"] = port
+		return true
+	}
+	return false
 }

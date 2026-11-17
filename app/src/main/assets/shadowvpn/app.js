@@ -1196,7 +1196,8 @@
       group("Когда проверять",
         row("При запуске", "Для сохранённого списка серверов", pingOnOpen),
         row("После обновления", "Когда подписка загружена заново", pingAfterUpdate)),
-      el("p", "group-note", "Auto и балансировщики всегда выбирают среди серверов, прошедших полную проверку."),
+      el("p", "group-note", "Auto и балансировщики всегда выбирают среди серверов, прошедших полную проверку."
+        + (s.relayEnabled ? " Цепочка включена: в Wi-Fi серверы проверяются через российский сервер, то есть так, как к ним пойдёт трафик." : "")),
       saveActions(() => ({
         pingMethod: method.value, pingOnOpen: isOn(pingOnOpen), pingAfterUpdate: isOn(pingAfterUpdate)
       })));
@@ -1767,86 +1768,162 @@
       })));
   }
 
-  // Connection check, step by step (Hiddify's connection health sheet).
-  let diagnosticsRows = null;
-  let diagnosticsVerdict = null;
-  const DIAGNOSTIC_STEPS = [
-    ["network", "Сеть телефона", "Есть ли интернет без VPN"],
-    ["whitelist", "Белые списки", "Не ограничил ли оператор интернет разрешёнными сайтами"],
-    ["dns", "Адрес сервера", "Находится ли сервер по имени"],
-    ["server", "Доступность сервера", "Проходит ли трафик через сервер"],
-    ["vpn", "Интернет через VPN", "Работает ли подключённый туннель"]
+  // Connection check, drawn as the route the traffic takes: phone → (Russian
+  // server of the chain) → server → internet. Every hop shows its checks;
+  // one plain answer on top says whether the server can be used from here.
+  const DIAGNOSTIC_STEPS = ["network", "whitelist", "relay", "dns", "server", "vpn"];
+  const DIAGNOSTIC_LABELS = {
+    network: "Сеть", whitelist: "Белые списки", relay: "Доступность",
+    dns: "Адрес", server: "Доступность", vpn: "Туннель"
+  };
+  const DIAGNOSTIC_HOPS = [
+    { id: "phone", title: "Телефон", steps: ["network", "whitelist"] },
+    { id: "relay", title: "РУ-сервер", steps: ["relay"] },
+    { id: "server", title: "Сервер", steps: ["dns", "server"] },
+    { id: "internet", title: "Интернет", steps: ["vpn"] }
   ];
+  let diagnostics = null;
 
   function buildDiagnostics() {
     const body = page("Диагностика", null);
-    const list = el("div", "list diagnostics");
-    diagnosticsRows = new Map();
-    DIAGNOSTIC_STEPS.forEach(([id, title, hint], index) => {
-      const node = row(title, hint);
-      node.classList.add("diag-row");
-      node.style.animationDelay = `${index * 60}ms`;
-      const mark = el("i", "diag-mark");
-      node.prepend(mark);
-      diagnosticsRows.set(id, { node, mark, detail: node.querySelector("small") });
-      list.append(node);
-    });
     const selected = snapshot.selectedId ? serverModels.get(snapshot.selectedId) || snapshot.selected : null;
-    diagnosticsVerdict = el("div", "diag-verdict");
-    diagnosticsVerdict.append(el("b"), el("small"));
-    body.append(
-      el("p", "group-note", selected ? `Проверяем «${selected.name}» и путь до него.` : "Сервер не выбран: проверим только сеть."),
-      diagnosticsVerdict,
-      list,
-      actions(button("Проверить снова", "secondary", startDiagnostics)));
+    const summary = el("div", "diag-summary");
+    summary.append(el("i", "diag-summary-mark"), el("div", "diag-summary-copy"));
+    summary.lastChild.append(el("b"), el("small"));
+    const route = el("div", "diag-route");
+    const hops = new Map();
+    DIAGNOSTIC_HOPS.forEach((hop, index) => {
+      const node = el("section", "diag-hop");
+      node.style.animationDelay = `${index * 60}ms`;
+      const rail = el("div", "diag-rail");
+      rail.append(el("i", "diag-dot"));
+      const head = el("div", "diag-hop-head");
+      const icon = hop.id === "phone" ? svgSlot("wifi")
+        : hop.id === "internet" ? svgSlot("globe")
+        : hop.id === "relay" ? flag({ countryCode: "ru" })
+        : flag(selected);
+      const copy = el("div", "diag-hop-copy");
+      const name = el("small", "diag-hop-name",
+        hop.id === "server" ? (selected?.name || "Сервер не выбран") : "");
+      copy.append(el("b", null, hop.title), name);
+      head.append(icon, copy);
+      const checks = el("div", "diag-checks");
+      const lines = new Map();
+      hop.steps.forEach(step => {
+        const line = el("div", "diag-check");
+        line.append(el("i", "diag-check-mark"), el("span", "diag-check-label", DIAGNOSTIC_LABELS[step]), el("span", "diag-check-text"));
+        lines.set(step, line);
+        checks.append(line);
+      });
+      const content = el("div", "diag-hop-body");
+      content.append(head, checks);
+      node.append(rail, content);
+      route.append(node);
+      hops.set(hop.id, { node, name, lines });
+    });
+    diagnostics = { summary, hops, steps: new Map() };
+    body.append(summary, route, actions(button("Проверить снова", "secondary", startDiagnostics)));
     startDiagnostics();
   }
 
+  function svgSlot(name) {
+    const slot = el("span", "server-flag diag-icon");
+    slot.append(svg(name));
+    return slot;
+  }
+
   function startDiagnostics() {
-    if (!diagnosticsRows) return;
-    DIAGNOSTIC_STEPS.forEach(([id, , hint]) => diagnosticsStep({ id, state: "wait", detail: hint }));
+    if (!diagnostics) return;
+    diagnostics.steps.clear();
+    // The Russian hop shows only once the app says the chain is on.
+    DIAGNOSTIC_STEPS.forEach(id => diagnosticsStep({ id, state: id === "relay" ? "none" : "wait", detail: "" }));
     native.runDiagnostics();
   }
 
   function diagnosticsStep(step) {
-    const item = diagnosticsRows?.get(step?.id);
-    if (!item) return;
-    item.node.dataset.state = step.state;
-    if (step.detail) item.detail.textContent = step.detail;
-    else if (step.state === "running") item.detail.textContent = "Проверяем…";
-    renderDiagnosticsVerdict();
+    if (!diagnostics || !step?.id) return;
+    diagnostics.steps.set(step.id, step);
+    renderDiagnostics();
   }
 
-  // One plain answer above the steps: can this server be used from here.
-  function renderDiagnosticsVerdict() {
-    if (!diagnosticsVerdict) return;
-    const state = id => diagnosticsRows.get(id)?.node.dataset.state;
-    const busy = DIAGNOSTIC_STEPS.some(([id]) => ["wait", "running"].includes(state(id)));
-    let tone = "busy", title = "Проверяем…", note = "Это займёт до 10 секунд";
+  const stateOf = id => diagnostics?.steps.get(id)?.state || "wait";
+  // Whitelists are a warning about the network, not a broken step.
+  const shownState = id => id === "whitelist" && stateOf(id) === "fail" ? "warn" : stateOf(id);
+
+  // A hop is as good as its worst check.
+  function hopState(hop) {
+    const states = hop.steps.map(shownState).filter(state => state !== "none");
+    if (!states.length) return "none";
+    for (const state of ["fail", "warn", "running", "wait"]) if (states.includes(state)) return state;
+    return states.every(state => state === "skip") ? "skip" : "ok";
+  }
+
+  function renderDiagnostics() {
+    const relayOn = stateOf("relay") !== "none";
+    DIAGNOSTIC_HOPS.forEach(hop => {
+      const view = diagnostics.hops.get(hop.id);
+      const state = hopState(hop);
+      view.node.dataset.state = state;
+      view.node.hidden = hop.id === "relay" && !relayOn;
+      if (hop.id === "relay") view.name.textContent = diagnostics.steps.get("relay")?.name || "";
+      if (hop.id === "phone") {
+        const network = diagnostics.steps.get("network")?.detail || "";
+        view.name.textContent = network.split(" · ")[0];
+      }
+      hop.steps.forEach(id => {
+        const line = view.lines.get(id);
+        const step = diagnostics.steps.get(id) || { state: "wait" };
+        line.dataset.state = shownState(id);
+        line.hidden = step.state === "none";
+        let text = step.detail || (step.state === "running" ? "Проверяем…" : step.state === "wait" ? "Ждёт проверки" : "");
+        // The network type is already the hop's name.
+        if (id === "network" && step.detail) text = step.detail.split(" · ").slice(1).join(" · ") || step.detail;
+        line.lastChild.textContent = text.charAt(0).toUpperCase() + text.slice(1);
+        line.children[1].textContent = id === "server" && relayOn ? "Доступность через РУ-сервер" : DIAGNOSTIC_LABELS[id];
+      });
+    });
+    renderDiagnosticsVerdict(relayOn);
+  }
+
+  // One plain answer above the route: can this server be used from here.
+  function renderDiagnosticsVerdict(relayOn) {
+    const summary = diagnostics.summary;
+    const state = stateOf;
+    const busy = DIAGNOSTIC_STEPS.some(id => ["wait", "running"].includes(state(id)));
+    let tone = "busy", title = "Проверяем маршрут…", note = relayOn
+      ? "Телефон → РУ-сервер → сервер → интернет. Это займёт до 15 секунд"
+      : "Телефон → сервер → интернет. Это займёт до 10 секунд";
     if (!busy) {
       const whitelist = state("whitelist") === "fail";
+      const relayName = diagnostics.steps.get("relay")?.name;
       if (state("network") === "fail") {
         tone = "fail"; title = "Нет интернета"; note = "Телефон не в сети: проверьте Wi-Fi или мобильные данные";
       } else if (whitelist && (state("dns") === "fail" || state("server") === "fail")) {
         tone = "fail"; title = "Похоже, включены белые списки";
         note = "Оператор пропускает только разрешённые сайты (VK, Яндекс, MAX). Выберите сервер, который работает при белых списках, или подключитесь к Wi-Fi";
+      } else if (state("relay") === "fail") {
+        tone = "fail"; title = relayName ? "РУ-сервер недоступен" : "Цепочка не работает";
+        note = relayName ? "Выберите другой российский сервер в настройках цепочки или выключите её"
+          : "В подписке нет доступных российских серверов: подключение пойдёт напрямую";
       } else if (state("dns") === "fail") {
         tone = "fail"; title = "Сервер не найден"; note = "Сеть не может найти адрес сервера. Смените сеть или DNS, или обновите подписку";
       } else if (state("server") === "fail") {
-        tone = "fail"; title = "Сервер недоступен"; note = "Выберите другой сервер или обновите подписку";
+        tone = "fail"; title = relayOn ? "Сервер недоступен с РУ-сервера" : "Сервер недоступен";
+        note = relayOn ? "Выберите другой сервер или выключите цепочку" : "Выберите другой сервер или обновите подписку";
       } else if (state("vpn") === "fail") {
         tone = "fail"; title = "VPN не пропускает интернет"; note = "Сервер доступен, но туннель не работает. Переподключитесь";
       } else if (state("server") === "ok") {
         tone = "ok"; title = "Сервер доступен";
         note = whitelist ? "Включены белые списки, но этот сервер через них проходит"
+          : relayOn ? `Трафик идёт через ${relayName || "российский сервер"}`
           : state("vpn") === "ok" ? "Всё работает: интернет идёт через VPN" : "Можно подключаться";
       } else {
         tone = "ok"; title = "Сеть работает"; note = "Выберите сервер, чтобы проверить его";
       }
     }
-    diagnosticsVerdict.dataset.tone = tone;
-    diagnosticsVerdict.querySelector("b").textContent = title;
-    diagnosticsVerdict.querySelector("small").textContent = note;
+    summary.dataset.tone = tone;
+    summary.querySelector("b").textContent = title;
+    summary.querySelector("small").textContent = note;
   }
 
   function buildLogs(fromSettings = false) {
@@ -2045,10 +2122,12 @@
     openPanel(preview);
     ({ settings:buildSettings, subscriptions:buildSubscriptions, logs:buildLogs, diagnostics:buildDiagnostics })[preview]();
     if (preview === "diagnostics") {
-      diagnosticsStep({ id:"network", state:"ok", detail:"Мобильная сеть · интернет есть" });
-      diagnosticsStep({ id:"whitelist", state:"fail", detail:"Похоже на белые списки: открываются VK, Яндекс и MAX, а обычные сайты нет. Работают только серверы, которые обходят белые списки" });
+      const relay = params.has("relay");
+      diagnosticsStep({ id:"network", state:"ok", detail:"Wi-Fi · интернет есть" });
+      diagnosticsStep({ id:"whitelist", state:"ok", detail:"Не обнаружены · обычные сайты открываются" });
+      diagnosticsStep({ id:"relay", state: relay ? "ok" : "none", detail:"Доступен · отвечает за 12 мс", name:"Россия | Москва" });
       diagnosticsStep({ id:"dns", state:"ok", detail:"Найден · de.example.com → 203.0.*.*" });
-      diagnosticsStep({ id:"server", state:"fail", detail:"Недоступен: сервер обрывает соединение. Обычно это неверный ключ или истёкшая подписка" });
+      diagnosticsStep({ id:"server", state: params.has("fail") ? "fail" : "ok", detail: params.has("fail") ? "Недоступен: сервер обрывает соединение. Обычно это неверный ключ или истёкшая подписка" : "Доступен · отвечает за 64 мс" });
       diagnosticsStep({ id:"vpn", state:"skip", detail:"VPN не подключён: подключитесь и запустите проверку снова" });
     }
   }

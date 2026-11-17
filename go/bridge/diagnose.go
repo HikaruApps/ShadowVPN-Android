@@ -16,11 +16,20 @@ import (
 type diagnoseStep struct {
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail"`
+	// Skipped: the step could not run because an earlier one failed.
+	Skipped bool `json:"skipped,omitempty"`
+}
+
+// diagnoseRelay is the Russian server of the chain, when it is on.
+type diagnoseRelay struct {
+	diagnoseStep
+	Name string `json:"name"`
 }
 
 type diagnoseResult struct {
-	DNS    diagnoseStep `json:"dns"`
-	Server diagnoseStep `json:"server"`
+	DNS    diagnoseStep   `json:"dns"`
+	Relay  *diagnoseRelay `json:"relay,omitempty"`
+	Server diagnoseStep   `json:"server"`
 }
 
 // Diagnose checks the selected server the way a connection would reach it:
@@ -68,7 +77,31 @@ func Diagnose(profileID string) (string, error) {
 			result.DNS.Detail += " (" + maskIPs(shortError(dnsErr)) + ")"
 		}
 		result.Server.Detail = "Пропущено: сервер не найден"
+		result.Server.Skipped = true
 		return marshalDiagnose(result)
+	}
+
+	// Relay: with the chain on, the Russian server is a hop of its own. It
+	// is checked by itself, and the server through it.
+	var relay *Profile
+	if options.Relay != nil {
+		result.Relay = &diagnoseRelay{}
+		picked, ok, reason := relayForChecks(profiles, options.Relay)
+		if !ok {
+			result.Relay.Detail = "Не найден: " + reason + ". Подключение пойдёт напрямую"
+		} else {
+			result.Relay.Name = picked.Name
+			latency, err := realPingProfile(ctx, picked, options.Fragmentation)
+			if err != nil {
+				result.Relay.Detail = "Недоступен: " + maskIPs(explainProbeError(err))
+				result.Server.Skipped = true
+				result.Server.Detail = "Пропущено: российский сервер недоступен"
+				return marshalDiagnose(result)
+			}
+			result.Relay.OK = true
+			result.Relay.Detail = fmt.Sprintf("Доступен · отвечает за %d мс", latency)
+			relay = &picked
+		}
 	}
 
 	// Server: a real request through it, as the server list checks it.
@@ -80,7 +113,13 @@ func Diagnose(profileID string) (string, error) {
 	answers := make(chan answer, len(candidates))
 	for _, profile := range candidates {
 		go func(profile Profile) {
-			latency, err := realPingProfile(ctx, profile, options.Fragmentation)
+			var latency int64
+			var err error
+			if ok, _ := chainable(profile); ok && relay != nil && relay.ID != profile.ID {
+				latency, err = realPingThroughRelay(ctx, profile, *relay, options.Fragmentation)
+			} else {
+				latency, err = realPingProfile(ctx, profile, options.Fragmentation)
+			}
 			answers <- answer{profile.Name, latency, err}
 		}(profile)
 	}
