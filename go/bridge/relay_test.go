@@ -214,3 +214,89 @@ func TestChainThroughXrayJSONLoadsInXray(t *testing.T) {
 		t.Fatal("the server's own dialer hop must be dropped from the chain")
 	}
 }
+
+// relayFixture: a Russian relay and a foreign server, both real Xray
+// Shadowsocks servers behind counting forwarders, and a local check target.
+func relayFixture(t *testing.T) (relay, main Profile, relayed, reached *atomic.Int32) {
+	t.Helper()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	previous := realPingURLs
+	realPingURLs = []string{target.URL + "/generate_204"}
+	t.Cleanup(func() { realPingURLs = previous })
+	checkRelay.Lock()
+	checkRelay.key = ""
+	checkRelay.Unlock()
+
+	relayPort, relayed := countingForwarder(t, startShadowsocksServer(t, "relay-password"))
+	mainPort, reached := countingForwarder(t, startShadowsocksServer(t, "main-password"))
+	relay = shadowsocksProfile(t, "relay", relayPort, "relay-password")
+	relay.Name = "🇷🇺 Россия | Москва"
+	main = shadowsocksProfile(t, "main", mainPort, "main-password")
+	main.Name = "🇩🇪 Germany"
+	return relay, main, relayed, reached
+}
+
+// With the chain on, the server list checks a server through the relay.
+func TestPingGoesThroughRelay(t *testing.T) {
+	relay, main, relayed, reached := relayFixture(t)
+	if _, err := realPingThroughRelay(t.Context(), main, relay, false); err != nil {
+		t.Fatalf("the check through the relay failed: %v", err)
+	}
+	if relayed.Load() == 0 || reached.Load() == 0 {
+		t.Fatalf("the check must pass the relay (%d) and reach the server (%d)", relayed.Load(), reached.Load())
+	}
+
+	// A broken relay makes the server unreachable from it.
+	broken := relay
+	broken.outbound = shadowsocksProfile(t, "relay", relay.port, "wrong-password").outbound
+	if _, err := realPingThroughRelay(t.Context(), main, broken, false); err == nil {
+		t.Fatal("a check through a relay that refuses must fail")
+	}
+
+	// The streamed check used by the server list takes the same path.
+	mobile.Lock()
+	previousProfiles, previousOptions := mobile.profiles, mobile.options
+	mobile.profiles = []Profile{main, relay}
+	mobile.options = mobileOptions{Relay: &relayOptions{}}
+	mobile.Unlock()
+	defer func() {
+		mobile.Lock()
+		mobile.profiles, mobile.options = previousProfiles, previousOptions
+		mobile.Unlock()
+	}()
+	relayed.Store(0)
+	result, err := PingProfile("main", "tcp")
+	if err != nil || !strings.Contains(result, `"available":true`) || strings.Contains(result, "direct") {
+		t.Fatalf("PingProfile through the relay: %s %v", result, err)
+	}
+	if relayed.Load() == 0 {
+		t.Fatal("even the quick method must go through the relay")
+	}
+	// The relay itself is checked directly.
+	if result, err := PingProfile("relay", "real"); err != nil || !strings.Contains(result, `"available":true`) {
+		t.Fatalf("the relay's own check: %s %v", result, err)
+	}
+
+	// Diagnostics show the relay as a hop of its own.
+	report, err := Diagnose("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Relay *struct {
+			OK           bool
+			Name, Detail string
+		} `json:"relay"`
+		Server struct {
+			OK     bool
+			Detail string
+		} `json:"server"`
+	}
+	_ = json.Unmarshal([]byte(report), &parsed)
+	if parsed.Relay == nil || !parsed.Relay.OK || parsed.Relay.Name != relay.Name || !parsed.Server.OK {
+		t.Fatalf("diagnostics with the chain: %s", report)
+	}
+}

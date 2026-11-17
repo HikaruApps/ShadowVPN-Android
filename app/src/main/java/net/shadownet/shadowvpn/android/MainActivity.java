@@ -770,8 +770,25 @@ public final class MainActivity extends Activity {
     }
 
     /** Runs the checks in a bounded pool and posts each completed host immediately. */
+    /**
+     * Checks follow the current network: with the chain on they go through
+     * the Russian server on Wi-Fi only, so the core gets the options again.
+     */
+    private void refreshCoreOptions() {
+        try {
+            CoreConfig.configure(this, preferences);
+        } catch (Exception ignored) { }
+    }
+
+    /** Results of the other path (direct or through the relay) must not be restored. */
+    private String pingCacheKey() {
+        return CoreConfig.pingMethod(preferences)
+                + (CoreConfig.relayActive(this, preferences) ? "+relay" : "");
+    }
+
     private void runPingChecks(String method) {
         ExecutorService pool = null;
+        refreshCoreOptions();
         try {
             JSONObject plan = new JSONObject(Bridge.pingPlan());
             List<PingHost> hosts = parsePingHosts(plan.optJSONArray("servers"));
@@ -964,12 +981,17 @@ public final class MainActivity extends Activity {
             diagnosticStep("network", network[0], network[1]);
             if (!"ok".equals(network[0])) {
                 diagnosticStep("whitelist", "skip", "Пропущено: нет сети");
+                diagnosticStep("relay", "none", "");
                 diagnosticStep("dns", "skip", "Пропущено: нет сети");
                 diagnosticStep("server", "skip", "Пропущено: нет сети");
                 diagnosticStep("vpn", "skip", "Пропущено: нет сети");
                 return;
             }
+            refreshCoreOptions();
+            boolean relay = CoreConfig.relayActive(this, preferences);
             diagnosticStep("whitelist", "running", "");
+            // The Russian server is a hop of its own while the chain is on.
+            diagnosticStep("relay", relay ? "running" : "none", "");
             diagnosticStep("dns", "running", "");
             diagnosticStep("server", "running", "");
             // Both checks go over the phone's own network, so they run side
@@ -980,11 +1002,20 @@ public final class MainActivity extends Activity {
                 JSONObject result = new JSONObject(Bridge.diagnose(profileId));
                 JSONObject dns = result.getJSONObject("dns");
                 JSONObject server = result.getJSONObject("server");
+                JSONObject relayHop = result.optJSONObject("relay");
                 diagnosticStep("dns", dns.optBoolean("ok") ? "ok" : "fail", dns.optString("detail"));
+                if (relayHop != null) {
+                    diagnosticStep("relay", relayHop.optBoolean("ok") ? "ok" : "fail",
+                            relayHop.optString("detail"), flagAndName(relayHop.optString("name")).name);
+                } else {
+                    diagnosticStep("relay", "none", "");
+                }
                 diagnosticStep("server", server.optBoolean("ok") ? "ok"
-                        : dns.optBoolean("ok") ? "fail" : "skip", server.optString("detail"));
+                        : server.optBoolean("skipped") || !dns.optBoolean("ok") ? "skip" : "fail",
+                        server.optString("detail"));
             } catch (Exception error) {
                 diagnosticStep("dns", "fail", cleanError(error));
+                diagnosticStep("relay", relay ? "skip" : "none", relay ? "Пропущено" : "");
                 diagnosticStep("server", "skip", "Пропущено");
             }
             try {
@@ -1045,10 +1076,16 @@ public final class MainActivity extends Activity {
     }
 
     private void diagnosticStep(String id, String state, String detail) {
+        diagnosticStep(id, state, detail, "");
+    }
+
+    /** name: what the step checks, e.g. the Russian server of the chain. */
+    private void diagnosticStep(String id, String state, String detail, String name) {
         ui.post(() -> {
             if (!webReady || webView == null) return;
             try {
-                JSONObject step = new JSONObject().put("id", id).put("state", state).put("detail", maskIps(detail));
+                JSONObject step = new JSONObject().put("id", id).put("state", state)
+                        .put("detail", maskIps(detail)).put("name", name == null ? "" : name);
                 webView.evaluateJavascript("window.ShadowVPN&&window.ShadowVPN.diagnosticsStep("
                         + step + ")", null);
             } catch (Exception ignored) { }
@@ -1074,7 +1111,7 @@ public final class MainActivity extends Activity {
             }
             JSONObject cache = new JSONObject()
                     .put("at", System.currentTimeMillis())
-                    .put("method", CoreConfig.pingMethod(preferences))
+                    .put("method", pingCacheKey())
                     .put("results", results);
             preferences.edit().putString("ping_cache", cache.toString()).apply();
         } catch (Exception ignored) { }
@@ -1087,7 +1124,7 @@ public final class MainActivity extends Activity {
             long age = System.currentTimeMillis() - cache.optLong("at", 0);
             // Old results, or ones from the other method, would only mislead.
             if (age < 0 || age > PING_CACHE_MAX_AGE
-                    || !CoreConfig.pingMethod(preferences).equals(cache.optString("method"))) return;
+                    || !pingCacheKey().equals(cache.optString("method"))) return;
             JSONObject results = cache.getJSONObject("results");
             for (java.util.Iterator<String> keys = results.keys(); keys.hasNext(); ) {
                 String id = keys.next();
@@ -1109,6 +1146,7 @@ public final class MainActivity extends Activity {
         if (pingRunning || id == null || id.isEmpty()) return;
         String method = CoreConfig.pingMethod(preferences);
         pingRunner.execute(() -> {
+            refreshCoreOptions();
             long started = SystemClock.elapsedRealtime();
             PingResult result = pingOne(new PingHost(id, "", false), method);
             long elapsed = SystemClock.elapsedRealtime() - started;

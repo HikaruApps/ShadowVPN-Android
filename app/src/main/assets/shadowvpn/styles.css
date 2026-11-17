@@ -373,22 +373,50 @@ textarea.field[rows="2"]{height:68px}
 .rule-tools .button{flex:1}
 
 /* ---------- Diagnostics ---------- */
-.diag-row{animation:rise 220ms var(--ease-out) both}
-.diag-mark{position:relative;flex:0 0 22px;width:22px;height:22px;border:2px solid var(--border-strong);border-radius:50%}
-.diag-row[data-state="running"] .diag-mark{border-top-color:var(--text-2);animation:spin 800ms linear infinite}
-.diag-row[data-state="ok"] .diag-mark{border-color:var(--success);background:var(--success)}
-.diag-row[data-state="ok"] .diag-mark::after{content:"";position:absolute;left:6px;top:2px;width:5px;height:10px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)}
-.diag-row[data-state="fail"] .diag-mark{border-color:var(--danger);background:var(--danger)}
-.diag-row[data-state="fail"] .diag-mark::after{content:"!";position:absolute;inset:0;display:grid;place-items:center;color:var(--bg);font-size:13px;font-weight:700;line-height:18px;text-align:center}
-.diag-row[data-state="skip"]{opacity:.55}
-.diag-row[data-state="fail"] small{color:var(--danger)}
-.diag-verdict{display:flex;flex-direction:column;gap:4px;margin:0 0 12px;padding:14px 16px;border:1px solid var(--border);border-radius:16px;background:var(--surface)}
-.diag-verdict b{font-size:17px;font-weight:650}
-.diag-verdict small{color:var(--text-2);font-size:13px}
-.diag-verdict[data-tone="ok"]{border-color:color-mix(in srgb,var(--success) 45%,transparent);background:color-mix(in srgb,var(--success) 10%,var(--surface))}
-.diag-verdict[data-tone="ok"] b{color:var(--success)}
-.diag-verdict[data-tone="fail"]{border-color:color-mix(in srgb,var(--danger) 45%,transparent);background:color-mix(in srgb,var(--danger) 10%,var(--surface))}
-.diag-verdict[data-tone="fail"] b{color:var(--danger)}
+/* Diagnostics: the route of the traffic, one hop per node */
+.diag-summary{display:flex;gap:14px;align-items:flex-start;margin:0 0 22px;padding:16px;border:1px solid var(--border);border-radius:18px;background:var(--surface)}
+.diag-summary-mark{position:relative;flex:0 0 28px;width:28px;height:28px;border:2px solid var(--border-strong);border-radius:50%}
+.diag-summary[data-tone="busy"] .diag-summary-mark{border-top-color:var(--text-2);animation:spin 800ms linear infinite}
+.diag-summary[data-tone="ok"] .diag-summary-mark{border-color:var(--success);background:var(--success-soft)}
+.diag-summary[data-tone="ok"] .diag-summary-mark::after{content:"";position:absolute;left:8px;top:4px;width:6px;height:11px;border:solid var(--success);border-width:0 2px 2px 0;transform:rotate(45deg)}
+.diag-summary[data-tone="fail"] .diag-summary-mark{border-color:var(--danger);background:var(--danger-soft)}
+.diag-summary[data-tone="fail"] .diag-summary-mark::after{content:"!";position:absolute;inset:0;display:grid;place-items:center;color:var(--danger);font-size:15px;font-weight:700}
+.diag-summary-copy{min-width:0;display:flex;flex-direction:column;gap:4px}
+.diag-summary b{font-size:16px;font-weight:650}
+.diag-summary small{color:var(--text-2);font-size:13px;line-height:1.45}
+.diag-route{display:flex;flex-direction:column}
+.diag-hop{display:flex;gap:12px;animation:rise 220ms var(--ease-out) both}
+.diag-rail{position:relative;flex:0 0 14px;display:flex;justify-content:center}
+.diag-rail::before{content:"";position:absolute;top:26px;bottom:-14px;width:2px;border-radius:1px;background:var(--border)}
+.diag-hop:last-child .diag-rail::before{display:none}
+.diag-hop[data-state="ok"] .diag-rail::before{background:color-mix(in srgb,var(--success) 45%,var(--border))}
+.diag-dot{position:relative;z-index:1;margin-top:13px;width:12px;height:12px;border:2px solid var(--border-strong);border-radius:50%;background:var(--bg)}
+.diag-hop[data-state="running"] .diag-dot{border-top-color:var(--text-2);animation:spin 800ms linear infinite}
+.diag-hop[data-state="ok"] .diag-dot{border-color:var(--success);background:var(--success)}
+.diag-hop[data-state="warn"] .diag-dot{border-color:var(--warning);background:var(--warning)}
+.diag-hop[data-state="fail"] .diag-dot{border-color:var(--danger);background:var(--danger)}
+.diag-hop[data-state="skip"]{opacity:.55}
+.diag-hop-body{flex:1;min-width:0;padding-bottom:18px}
+.diag-hop-head{display:flex;align-items:center;gap:10px;min-height:38px}
+.diag-hop-head .server-flag{width:30px;height:30px;flex-basis:30px}
+.diag-icon svg{width:16px;height:16px}
+.diag-hop-copy{min-width:0;display:flex;flex-direction:column}
+.diag-hop-copy b{font-size:15px;font-weight:600}
+.diag-hop-name{overflow:hidden;color:var(--text-2);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.diag-hop-name:empty{display:none}
+.diag-checks{display:flex;flex-direction:column;gap:10px;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:14px;background:var(--surface)}
+.diag-check{display:grid;grid-template-columns:6px 1fr;gap:1px 10px;align-items:center;font-size:13px;line-height:1.4}
+.diag-check-mark{grid-row:1;width:6px;height:6px;border-radius:50%;background:var(--border-strong)}
+.diag-check-label{grid-row:1;grid-column:2;color:var(--text-3);font-size:12px}
+.diag-check-text{grid-column:2;min-width:0;color:var(--text);overflow-wrap:anywhere}
+.diag-check[data-state="running"] .diag-check-mark{background:var(--text-2);animation:diag-pulse 1s ease-in-out infinite alternate}
+.diag-check[data-state="ok"] .diag-check-mark{background:var(--success)}
+.diag-check[data-state="warn"] .diag-check-mark{background:var(--warning)}
+.diag-check[data-state="warn"] .diag-check-text{color:color-mix(in srgb,var(--warning) 80%,var(--text))}
+.diag-check[data-state="fail"] .diag-check-mark{background:var(--danger)}
+.diag-check[data-state="fail"] .diag-check-text{color:color-mix(in srgb,var(--danger) 80%,var(--text))}
+.diag-check[data-state="skip"]{opacity:.6}
+@keyframes diag-pulse{from{opacity:.35}to{opacity:1}}
 
 /* ---------- Subscription offer ---------- */
 .offer-scrim{position:fixed;z-index:140;inset:0;display:flex;align-items:flex-end;justify-content:center;padding:var(--gutter);background:rgba(0,0,0,.6);opacity:0;transition:opacity 180ms var(--ease-in)}

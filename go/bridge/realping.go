@@ -53,7 +53,13 @@ func realPingProfile(parent context.Context, profile Profile, fragmentation bool
 	if err != nil {
 		return 0, err
 	}
-	config, err := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "none"}, "outbounds": []any{outbound}})
+	return measureProbeConfig(ctx, map[string]any{"log": map[string]any{"loglevel": "none"}, "outbounds": []any{outbound}})
+}
+
+// measureProbeConfig starts a short-lived Xray instance from a probe config
+// and measures a real request through its first outbound.
+func measureProbeConfig(ctx context.Context, document map[string]any) (int64, error) {
+	config, err := json.Marshal(document)
 	if err != nil {
 		return 0, err
 	}

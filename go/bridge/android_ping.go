@@ -78,6 +78,7 @@ func PingProfile(profileID, method string) (string, error) {
 	}
 	profiles := append([]Profile(nil), mobile.profiles...)
 	fragmentation := mobile.options.Fragmentation
+	relayOptions := mobile.options.Relay
 	mobile.Unlock()
 
 	flat, _ := flattenGroups(profiles)
@@ -121,6 +122,18 @@ func PingProfile(profileID, method string) (string, error) {
 	var latency int64
 	var err error
 	direct := false
+	// With the chain on (Wi-Fi), a server that goes through the relay is
+	// checked through it, whatever the method: a TCP knock from the phone
+	// would say nothing about the path, and one through Xray answers before
+	// the relay has reached the server.
+	if relayOptions != nil {
+		if ok, _ := chainable(target); ok {
+			if relay, found, _ := relayForChecks(profiles, relayOptions); found && relay.ID != target.ID {
+				latency, err = realPingThroughRelay(ctx, target, relay, fragmentation)
+				return marshalPing(target.ID, latency, err == nil, false)
+			}
+		}
+	}
 	switch method {
 	case "real":
 		latency, err = realPingProfile(ctx, target, fragmentation)
@@ -137,11 +150,13 @@ func PingProfile(profileID, method string) (string, error) {
 		latency, _, err = tcpPingEndpoint(ctx, target.address, target.port)
 	}
 
-	result, marshalErr := json.Marshal(streamedPingResult{
-		ID: target.ID, LatencyMS: latency, Available: err == nil, Direct: direct,
-	})
-	if marshalErr != nil {
-		return "", marshalErr
+	return marshalPing(target.ID, latency, err == nil, direct)
+}
+
+func marshalPing(id string, latency int64, available, direct bool) (string, error) {
+	result, err := json.Marshal(streamedPingResult{ID: id, LatencyMS: latency, Available: available, Direct: direct})
+	if err != nil {
+		return "", err
 	}
 	return string(result), nil
 }

@@ -72,12 +72,17 @@ final class CoreConfig {
         // Server chaining through a Russian server, only on Wi-Fi: on mobile
         // data the connection stays direct. A network change reloads the core,
         // which re-reads this.
-        if (preferences.getBoolean("relay_enabled", false)
-                && currentTransport(context) == NetworkCapabilities.TRANSPORT_WIFI) {
+        if (relayActive(context, preferences)) {
             options.put("relay", new JSONObject().put("profileId",
                     preferences.getString("relay_profile", "")));
         }
         return options;
+    }
+
+    /** Server chaining through a Russian server is on and the phone is on Wi-Fi. */
+    static boolean relayActive(Context context, SharedPreferences preferences) {
+        return preferences.getBoolean("relay_enabled", false)
+                && currentTransport(context) == NetworkCapabilities.TRANSPORT_WIFI;
     }
 
     /** Applies the saved options to the core; throws with a user-facing message if invalid. */
