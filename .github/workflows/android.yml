@@ -2,12 +2,26 @@ name: Android build
 on:
   push:
   pull_request:
+  # Publishing a release on GitHub builds its tag and attaches the APK.
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the APK to this existing release tag (empty: just build)"
+        required: false
+        default: ""
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A manual run for a release builds that release's tag.
+          # Empty for every other run, which keeps checkout's default commit.
+          ref: ${{ github.event.inputs.release_tag || '' }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -50,3 +64,13 @@ jobs:
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 7
+      - name: Attach the APK to the release
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
+        run: |
+          # v0.24.4 and v.0.24.4 both give ShadowVPN-0.24.4.apk.
+          version="${TAG#v}"; version="${version#.}"
+          cp app/build/outputs/apk/release/app-release.apk "ShadowVPN-$version.apk"
+          gh release upload "$TAG" "ShadowVPN-$version.apk" --clobber --repo "$GITHUB_REPOSITORY"

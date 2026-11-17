@@ -27,9 +27,12 @@ cd go && go test ./bridge -run TestParseNaiveHTTPSURI   # single test
 - The AAR must exist before Gradle can compile the app; it is generated and git-ignored.
 - `build-bridge.sh` copies `go.mod`, `go.sum`, `bridge/*.go` and `third_party/utls`
   into a temp dir and binds there. `-ldflags=-checklinkname=0` is required (Xray's
-  transitive dep `github.com/wlynxg/anet`).
+  transitive dep `github.com/wlynxg/anet`), and so is `CGO_LDFLAGS_ALLOW='-l:libcronet\.a'`
+  (Go 1.27.4+ rejects cronet-go's `-l:libcronet.a` link flag otherwise); both scripts set it.
 - CI (`.github/workflows/android.yml`) runs bridge build → `go test ./...` →
-  `assembleRelease` on every push/PR and uploads `ShadowVPN-Android` (`app-release.apk`).
+  `assembleRelease` on every push/PR and uploads `ShadowVPN-Android` (`app-release.apk`). Publishing
+  a GitHub release builds its tag and attaches `ShadowVPN-<version>.apk` to it; a manual run
+  (`workflow_dispatch`) with `release_tag` does the same for an existing release.
   Release is signed with the key from the `SIGNING_*` secrets (falls back to the debug
   key without them), so updates install over each other and the HWID stays stable.
 - Version bumps: `versionCode`/`versionName` in `app/build.gradle`.
@@ -87,7 +90,10 @@ Three layers, all in one process:
      instance is closed and the TUN and local proxy inbounds attached (`attachInbounds`). `SwitchProfile`,
      `Reload` (network change, Xray-only settings) and the watchdog (rebuilds after
      consecutive failed probes) all use this; a failed probe keeps the current server.
-   - Android-only files: `android_net.go` (the phone's own network: system DNS with a Yandex DNS
+   - Android-only files: `relay.go` (server chaining like Karing: on Wi-Fi with `relay` in the options,
+     non-Russian TCP servers dial through a Russian one via `sockopt.dialerProxy`, the fastest by TCP
+     or the chosen one; UDP protocols and Naive stay direct; `ActiveRelay` names it for the UI),
+     `android_net.go` (the phone's own network: system DNS with a Yandex DNS
      fallback for servers and subscriptions, direct transport, whitelist probe; subscriptions load
      directly first, the tunnel races in after 2 s), `xrayjson.go` (Xray JSON import and sanitizing), `links.go`
      (vmess://, ss://), `android_config.go` (turns the desktop config into the Android

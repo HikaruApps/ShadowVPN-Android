@@ -83,7 +83,11 @@ func profilesWithoutProtocol(profiles []Profile, protocol string) []Profile {
 func profilesForRenderer(profiles []Profile) []Profile {
 	result := make([]Profile, 0, len(profiles)+2)
 	result = append(result, autoProfile(), autoNoRUProfile())
-	return append(result, profiles...)
+	for _, profile := range profiles {
+		profile.Russian = len(profile.members) == 0 && isRussianProfile(profile) && profile.Protocol != "naive"
+		result = append(result, profile)
+	}
+	return result
 }
 
 func fastestProfile(profiles []Profile, results []PingResult) (int, PingResult, bool) {

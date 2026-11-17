@@ -30,6 +30,9 @@ type Profile struct {
 	Format string `json:"format,omitempty"`
 	// Members is the number of servers behind a balancer profile.
 	Members int `json:"members,omitempty"`
+	// Russian marks servers in Russia, which can relay a chain (filled in
+	// for the app's server list).
+	Russian bool `json:"russian,omitempty"`
 	// Connection details stay private to Go. Besides keeping credentials out of
 	// the generated Java API, this is required by gomobile: arbitrary Go maps
 	// are not supported in exported structs.

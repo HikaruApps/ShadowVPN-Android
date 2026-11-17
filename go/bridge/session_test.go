@@ -49,8 +49,8 @@ func TestSwitchKeepsTunnelAndFallsBackOnDeadServer(t *testing.T) {
 	ports := map[string]int{"good": freePort(t), "good2": freePort(t), "dead": freePort(t)}
 	outbounds := map[string]string{"good": "freedom", "good2": "freedom", "dead": "blackhole"}
 	previousBuild, previousAttach, previousProbe := buildSessionFunc, attachTunFunc, probeURL
-	buildSessionFunc = func(id string, _ sessionInputs) ([]byte, *naiveRuntime, error) {
-		return sessionConfig(ports[id], outbounds[id]), nil, nil
+	buildSessionFunc = func(id string, _ sessionInputs) ([]byte, *naiveRuntime, string, error) {
+		return sessionConfig(ports[id], outbounds[id]), nil, "", nil
 	}
 	attachTunFunc = func(instance *core.Instance, tun *core.InboundHandlerConfig, _ int) error {
 		return core.AddInboundHandler(instance, tun)

@@ -125,7 +125,7 @@ func TestProxyOnlySession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer Configure("")
-	build := func(string, sessionInputs) ([]byte, *naiveRuntime, error) {
+	build := func(string, sessionInputs) ([]byte, *naiveRuntime, string, error) {
 		sniffing := map[string]any{"enabled": true, "destOverride": []string{"http", "tls"}}
 		document := map[string]any{
 			"log":       map[string]any{"loglevel": "none"},
@@ -134,7 +134,7 @@ func TestProxyOnlySession(t *testing.T) {
 			"routing":   map[string]any{"rules": applyLocalProxyRules(nil, settings)},
 		}
 		config, err := json.Marshal(document)
-		return config, nil, err
+		return config, nil, "", err
 	}
 	previousBuild, previousProbe := buildSessionFunc, probeURL
 	buildSessionFunc, probeURL = build, target.URL+"/generate_204"

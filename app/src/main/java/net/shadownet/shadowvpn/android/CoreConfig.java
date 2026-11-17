@@ -69,6 +69,14 @@ final class CoreConfig {
             options.put("autoProfileIds", new JSONArray());
         }
         options.put("preferredSource", preferredSource(context, preferences));
+        // Server chaining through a Russian server, only on Wi-Fi: on mobile
+        // data the connection stays direct. A network change reloads the core,
+        // which re-reads this.
+        if (preferences.getBoolean("relay_enabled", false)
+                && currentTransport(context) == NetworkCapabilities.TRANSPORT_WIFI) {
+            options.put("relay", new JSONObject().put("profileId",
+                    preferences.getString("relay_profile", "")));
+        }
         return options;
     }
 

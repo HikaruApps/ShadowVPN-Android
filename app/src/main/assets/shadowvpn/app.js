@@ -551,7 +551,7 @@
     const error = snapshot.state === "error";
     const blocked = snapshot.state === "blocked";
     const target = switchTarget();
-    const key = [snapshot.state, selected?.id, selected?.name, target?.id, error ? snapshot.serviceStatus : ""].join("\u0000");
+    const key = [snapshot.state, selected?.id, selected?.name, target?.id, error ? snapshot.serviceStatus : "", snapshot.relay || ""].join("\u0000");
     if (key === statusKey) return;
     statusKey = key;
     if (connected && target) {
@@ -577,7 +577,9 @@
       // The server is already shown in the dock below.
       detail.textContent = "Нажмите ещё раз, чтобы отменить";
     } else if (connected) {
-      // Nothing to add: the server is in the dock, its latency in the pill.
+      // The server is in the dock and its latency in the pill; only a chain
+      // through a Russian server is worth a line.
+      if (snapshot.relay) detail.append(flag({ countryCode: "ru" }), el("span", null, `через ${snapshot.relay}`));
     } else {
       detail.textContent = selected ? "Нажмите, чтобы подключиться" : "Выберите сервер ниже";
     }
@@ -1244,6 +1246,19 @@
     const killSwitch = switchControl(!!s.killSwitch);
     const autoConnectOpen = switchControl(!!s.autoConnectOpen);
     const autoConnectBoot = switchControl(!!s.autoConnectBoot);
+    // Server chain: the phone connects to a server in Russia, which carries
+    // the connection on to the chosen one. Only on Wi-Fi.
+    const relayOn = switchControl(!!s.relayEnabled);
+    const russian = (snapshot.servers || []).filter(server => server.russian);
+    const relayChoice = selectControl(
+      [["", "Самый быстрый"], ...russian.map(server => [server.id, server.name])],
+      russian.some(server => server.id === s.relayProfile) ? s.relayProfile : "");
+    const relayRow = row("Сервер-посредник", russian.length
+      ? "Через какой российский сервер идти"
+      : "В подписке нет российских серверов: цепочка не заработает", relayChoice);
+    const syncRelay = () => { relayRow.hidden = !isOn(relayOn); };
+    relayOn.addEventListener("click", syncRelay);
+    syncRelay();
     fragment.append(
       group("Автоподключение",
         row("При запуске приложения", "К выбранному серверу", autoConnectOpen),
@@ -1252,8 +1267,13 @@
         row("Kill Switch", "Без интернета, пока VPN не подключится или если сервер пропал", killSwitch),
         row("Системная блокировка", "Если Android остановит приложение: «Постоянная VPN» и «Блокировать без VPN»",
           button("Открыть", "secondary", () => native.openVpnSettings(), true))),
+      group("Цепочка серверов",
+        row("Через российский сервер", "Только в Wi-Fi: трафик идёт сначала на сервер в России, а с него на выбранный. Помогает, когда зарубежные серверы режет провайдер", relayOn),
+        relayRow),
+      el("p", "group-note", "В мобильной сети подключение идёт напрямую. Hysteria, WireGuard и Naive в цепочке не работают."),
       saveActions(() => ({
-        autoConnectOpen: isOn(autoConnectOpen), autoConnectBoot: isOn(autoConnectBoot), killSwitch: isOn(killSwitch)
+        autoConnectOpen: isOn(autoConnectOpen), autoConnectBoot: isOn(autoConnectBoot), killSwitch: isOn(killSwitch),
+        relayEnabled: isOn(relayOn), relayProfile: relayChoice.value
       })));
     return fragment;
   }
@@ -2002,15 +2022,17 @@
   }
   mockServers.splice(1, 0, {id:"group",name:"Авто-выбор 🚀",countryCode:"",protocol:"BALANCER",transport:"",members:8,format:"json",source:"Wi-Fi",auto:false,selected:false,latency:52,available:true});
   mockServers[1].subscription = {title:"ShadowVPN",used:12884901888,total:107374182400,expire:1893456000};
+  mockServers.push({id:"ru1",source:"Wi-Fi",name:"Россия | Москва",countryCode:"ru",protocol:"VLESS",transport:"TCP",auto:false,selected:false,latency:12,available:true,russian:true},
+    {id:"ru2",source:"Wi-Fi",name:"Россия | Санкт-Петербург",countryCode:"ru",protocol:"TROJAN",transport:"TCP",auto:false,selected:false,latency:18,available:true,russian:true});
   const mockApps = Array.from({length: 180}, (_, i) => ({name:`Приложение ${i + 1}`,packageName:`com.example.app${i + 1}`}));
   native.getInstalledApps = () => JSON.stringify({apps: mockApps});
   render({
     state:"connected",serviceStatus:"Подключено",needsSubscription:false,importRunning:false,pingRunning:false,message:"",appVersion:"0.16.0",
-    publicIp:"132.243.*.*",session:"00:02:18",traffic:{downloadSpeed:"25,7 КБ/с",downloadTotal:"6,1 МБ",uploadSpeed:"58,8 КБ/с",uploadTotal:"135 КБ"},
+    publicIp:"132.243.*.*",session:"00:02:18",relay:params.has("relay") ? "Россия | Москва" : "",traffic:{downloadSpeed:"25,7 КБ/с",downloadTotal:"6,1 МБ",uploadSpeed:"58,8 КБ/с",uploadTotal:"135 КБ"},
     selectedId:mockServers[1].id,
     servers:mockServers,
     subscriptions:{wifi:"https://example.com/wifi",lte:"https://example.com/lte",manual:""},
-    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,killSwitch:false,mux:false,ipType:"auto",routeOnly:false,blockUdp:false,memoryLimit:"0",proxyEnabled:true,proxyHttp:true,proxySocksPort:"10808",proxyHttpPort:"10809",proxyLan:true,proxyOnly:false,proxyUser:"svpnA7kq",proxyPass:"Xm4tQ9rWb2nLp8Vz",proxyAddresses:["192.168.43.1"],dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"real",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
+    settings:{autoUpdate:"1440",updateOnOpen:false,notifyUpdates:false,sendHwid:true,pingOnOpen:true,pingAfterUpdate:true,autoConnectOpen:false,autoConnectBoot:false,killSwitch:false,relayEnabled:params.has("relay"),relayProfile:"",mux:false,ipType:"auto",routeOnly:false,blockUdp:false,memoryLimit:"0",proxyEnabled:true,proxyHttp:true,proxySocksPort:"10808",proxyHttpPort:"10809",proxyLan:true,proxyOnly:false,proxyUser:"svpnA7kq",proxyPass:"Xm4tQ9rWb2nLp8Vz",proxyAddresses:["192.168.43.1"],dnsProvider:"subscription-doh",routingMode:"full",routingRules:"",pingMethod:"real",fragmentation:true,tunMtu:"1400",ipv6Enabled:false,appRoutingMode:"all",appRoutingPackages:[],doh:"dns.shadowvpn.io",lanDirect:true,customDns:"",subscriptionRules:true,geoipUrl:"",geositeUrl:"",autoProfiles:[],hwid:"5191f00c7aa812b926a9f785944ff53c18c7e846969125ba66dced29a123ff53",batteryUnrestricted:false}
   });
   if (params.has("disconnected")) render({ state:"disconnected", serviceStatus:"", publicIp:"85.95.178.108", session:"" });
   if (params.has("blocked")) render({ state:"blocked", serviceStatus:"Ошибка: сервер не отвечает", publicIp:"" });
