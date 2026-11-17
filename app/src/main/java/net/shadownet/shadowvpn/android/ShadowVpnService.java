@@ -147,6 +147,7 @@ public final class ShadowVpnService extends VpnService {
             status = "Подключено";
             addLog((proxyOnly ? "Xray запущен как локальный прокси, без VPN" : "Xray запущен")
                     + " за " + seconds(phase));
+            logRelay();
             updateNotification(proxyOnly ? "Прокси 127.0.0.1:"
                     + CoreConfig.port(preferences, "proxy_socks_port", 10808) : "VPN подключён");
             watchNetwork();
@@ -264,6 +265,7 @@ public final class ShadowVpnService extends VpnService {
             CoreConfig.configure(this, CoreConfig.preferences(this));
             Bridge.reload();
             addLog("Соединение обновлено");
+            logRelay();
         } catch (Exception error) {
             String message = error.getMessage() == null ? "неизвестная ошибка" : error.getMessage();
             addLog("Не удалось обновить соединение: " + message);
@@ -422,6 +424,14 @@ public final class ShadowVpnService extends VpnService {
         if (updateStatus) status = "Отключено";
         if (updateStatus) addLog("VPN отключён");
         if (updateStatus) VpnControl.refreshSurfaces(this);
+    }
+
+    /** The Russian server the connection goes through, when chaining is on. */
+    static void logRelay() {
+        try {
+            String relay = Bridge.activeRelay();
+            if (relay != null && !relay.isEmpty()) addLog("Цепочка: через " + relay);
+        } catch (Exception ignored) { }
     }
 
     private static String seconds(long since) {

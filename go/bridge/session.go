@@ -38,8 +38,9 @@ func currentSessionInputs() sessionInputs {
 var geoDataConnectWait = 12 * time.Second
 
 // buildSession resolves the chosen profile and returns its Android runtime
-// config, plus the Cronet runtime when the profile is Naive.
-func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, error) {
+// config, plus the Cronet runtime when the profile is Naive and the name of
+// the relay the connection is chained through, if any.
+func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, string, error) {
 	options := in.options
 	dnsID := options.DNSID
 	if dnsID == "" {
@@ -47,12 +48,12 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 	}
 	_, dns, err := selectedDNSWithDoH(dnsID, options.CustomDNS, options.DoHURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	geoIP, geoSite := options.geoURLs()
 	routing, err := newRoutingOptions(options.RoutingMode, options.RoutingRules, geoIP, geoSite)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	runtime := androidRuntimeOptions{
 		MTU:               options.TunMTU,
@@ -80,11 +81,37 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 		},
 	}
 
+	// With the relay on, servers dial through a Russian one (see relay.go).
+	// It is picked once per connection; without one the connection goes
+	// direct and the app shows why.
+	var relay Profile
+	relayed := false
+	if options.Relay != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		var reason string
+		relay, relayed, reason = pickRelay(ctx, in.profiles, options.Relay)
+		cancel()
+		if !relayed {
+			setRuntimeWarning("Цепочка не используется: " + reason + ". Подключение напрямую")
+		}
+	}
+	relayName := ""
+	chain := func(profile Profile) (Profile, error) {
+		if !relayed || profile.ID == relay.ID {
+			return profile, nil
+		}
+		if ok, _ := chainable(profile); !ok {
+			return profile, nil
+		}
+		relayName = relay.Name
+		return chainThrough(profile, relay, options.Fragmentation)
+	}
+
 	// Auto and balancer configs from Xray JSON both run Xray's leastPing
 	// balancer over a set of servers, fastest first.
-	balance := func(candidates []Profile, empty string) ([]byte, *naiveRuntime, error) {
+	balance := func(candidates []Profile, empty string) ([]byte, *naiveRuntime, string, error) {
 		if len(candidates) == 0 {
-			return nil, nil, errors.New(empty)
+			return nil, nil, "", errors.New(empty)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -92,16 +119,22 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 		results := verifiedPingProfiles(ctx, candidates, options.Fragmentation)
 		prepared, _, _, err := prepareAutoProfiles(ctx, candidates, results)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
+		}
+		// Servers that can go through the relay do; the rest stay direct.
+		for index := range prepared {
+			if prepared[index], err = chain(prepared[index]); err != nil {
+				return nil, nil, "", err
+			}
 		}
 		config, err := makeAutoConfigWithRoutingAndDoH(prepared, dnsID, options.CustomDNS, options.DoHURL, options.Fragmentation, "", routing)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 		runtime.Profiles = prepared
 		runtime.Auto = true
 		config, err = androidRuntimeConfig(config, runtime)
-		return config, nil, err
+		return config, nil, relayName, err
 	}
 	if isAutoProfileID(profileID) {
 		return balance(autoCandidates(in.profiles, options, profileID), "Для Auto нет подходящих серверов")
@@ -115,7 +148,7 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 		}
 	}
 	if chosen == nil {
-		return nil, nil, errors.New("Сервер отсутствует в подписке. Обновите её")
+		return nil, nil, "", errors.New("Сервер отсутствует в подписке. Обновите её")
 	}
 	if len(chosen.members) > 0 {
 		return balance(profilesWithoutProtocol(chosen.members, "naive"), "В балансировщике нет подходящих серверов")
@@ -124,12 +157,19 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 	defer cancel()
 	resolved, _, err := resolveProfileEndpoint(ctx, *chosen)
 	if err != nil {
-		return nil, nil, errors.New("Не удалось определить IP сервера")
+		return nil, nil, "", errors.New("Не удалось определить IP сервера")
+	}
+	if relayed {
+		if ok, why := chainable(resolved); !ok {
+			setRuntimeWarning("Цепочка не используется: " + why + ". Подключение напрямую")
+		} else if resolved, err = chain(resolved); err != nil {
+			return nil, nil, "", err
+		}
 	}
 	var naive *naiveRuntime
 	if resolved.Protocol == "naive" {
 		if naive, err = newNaiveRuntime(resolved); err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 	}
 	// A profile that already chains through a fragmenting dialer must not be
@@ -144,9 +184,9 @@ func buildSession(profileID string, in sessionInputs) ([]byte, *naiveRuntime, er
 		if naive != nil {
 			_ = naive.Close()
 		}
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	return config, naive, nil
+	return config, naive, relayName, nil
 }
 
 // detachedInbounds are the listeners of a config that start only once the
@@ -301,7 +341,7 @@ func switchSession(profileID string, reload bool) error {
 	mobile.Unlock()
 	defer func() { mobile.Lock(); mobile.switching = false; mobile.Unlock() }()
 
-	config, naive, err := buildSessionFunc(profileID, inputs)
+	config, naive, relay, err := buildSessionFunc(profileID, inputs)
 	if err != nil {
 		return err
 	}
@@ -349,6 +389,7 @@ func switchSession(profileID string, reload bool) error {
 	}
 	closeNaive(oldNaive)
 	mobile.instance, mobile.naive, mobile.profileID = instance, naive, profileID
+	setActiveRelay(relay)
 	activateDialer(instance)
 	return nil
 }

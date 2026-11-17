@@ -589,7 +589,8 @@ public final class MainActivity extends Activity {
                     profile.optBoolean("auto", false),
                     profile.optInt("sourceIndex", -1),
                     profile.optString("format", ""),
-                    profile.optInt("members", 0)));
+                    profile.optInt("members", 0),
+                    profile.optBoolean("russian", false)));
         }
         return parsed;
     }
@@ -1413,6 +1414,12 @@ public final class MainActivity extends Activity {
             root.put("serviceStatus", maskIps(ShadowVpnService.status));
             root.put("message", maskIps(uiMessage));
             root.put("publicIp", maskIp(publicIp));
+            // The Russian server the connection is chained through, if any.
+            String relay = "";
+            if (ShadowVpnService.connected) {
+                try { relay = Bridge.activeRelay(); } catch (Exception ignored) { }
+            }
+            root.put("relay", relay == null || relay.isEmpty() ? "" : flagAndName(relay).name);
             root.put("session", connected ? formatDuration(
                     Math.max(0, SystemClock.elapsedRealtime() - connectedAt) / 1000) : "00:00:00");
             JSONObject traffic = new JSONObject();
@@ -1438,6 +1445,7 @@ public final class MainActivity extends Activity {
         item.put("format", server.format);
         item.put("members", server.members);
         item.put("auto", server.auto);
+        item.put("russian", server.russian);
         item.put("source", server.sourceIndex == MANUAL_SOURCE ? "manual"
                 : server.sourceIndex < 0 ? "" : subscriptionSlotName(server.sourceIndex));
         SubscriptionInfo source = server.sourceIndex == MANUAL_SOURCE
@@ -1481,6 +1489,8 @@ public final class MainActivity extends Activity {
         value.put("routingRules", preferences.getString("routing_rules", ""));
         value.put("pingMethod", CoreConfig.pingMethod(preferences));
         value.put("fragmentation", preferences.getBoolean("fragmentation", false));
+        value.put("relayEnabled", preferences.getBoolean("relay_enabled", false));
+        value.put("relayProfile", preferences.getString("relay_profile", ""));
         value.put("mux", preferences.getBoolean("mux", false));
         value.put("ipType", preferences.getString("ip_type", "auto"));
         value.put("routeOnly", preferences.getBoolean("route_only", false));
@@ -1508,7 +1518,8 @@ public final class MainActivity extends Activity {
     private static final String[] TUN_KEYS = {
             "tun_mtu", "ipv6_enabled", "lan_direct", "app_routing_mode", "app_routing_packages"};
     private static final String[] CORE_KEYS = {
-            "dns_provider", "custom_dns", "fragmentation", "routing_mode", "routing_rules",
+            "dns_provider", "custom_dns", "fragmentation", "relay_enabled", "relay_profile",
+            "routing_mode", "routing_rules",
             "subscription_rules", "geoip_url", "geosite_url", "auto_profiles",
             "mux", "ip_type", "route_only", "block_udp",
             "proxy_enabled", "proxy_http", "proxy_socks_port", "proxy_http_port", "proxy_lan",
@@ -1553,6 +1564,7 @@ public final class MainActivity extends Activity {
                     rememberSelectedName();
                     uiMessage = "Сервер переключён";
                     ShadowVpnService.addLog("Сервер переключён без разрыва VPN");
+                    ShadowVpnService.logRelay();
                     notifySelectedServer(target.id);
                     refreshVpnIp();
                 } else {
@@ -1628,6 +1640,8 @@ public final class MainActivity extends Activity {
             editor.putString("ping_mode", allowed(value.optString("pingMethod"),
                     new String[]{"real", "tcp"}, "real"));
             editor.putBoolean("fragmentation", value.optBoolean("fragmentation", false));
+            editor.putBoolean("relay_enabled", value.optBoolean("relayEnabled", false));
+            editor.putString("relay_profile", value.optString("relayProfile", "").trim());
             editor.putBoolean("mux", value.optBoolean("mux", false));
             String ipType = allowed(value.optString("ipType"),
                     new String[]{"auto", "ipv4", "ipv6"}, "auto");
@@ -2140,9 +2154,11 @@ public final class MainActivity extends Activity {
         final int sourceIndex;
         final String format;
         final int members;
+        /** A server in Russia, which can relay the chain on Wi-Fi. */
+        final boolean russian;
 
         ServerItem(String id, String name, String protocol, String transport, boolean auto,
-                   int sourceIndex, String format, int members) {
+                   int sourceIndex, String format, int members, boolean russian) {
             this.id = id;
             this.name = name;
             this.protocol = protocol;
@@ -2151,6 +2167,7 @@ public final class MainActivity extends Activity {
             this.sourceIndex = sourceIndex;
             this.format = format;
             this.members = members;
+            this.russian = russian;
         }
     }
 

@@ -53,6 +53,8 @@ var mobile struct {
 	// warning tells the app that something was left out, e.g. a routing rule
 	// whose list could not be downloaded.
 	warning string
+	// preparedRelay names the relay of the prepared session, if any.
+	preparedRelay string
 }
 
 type mobileOptions struct {
@@ -80,6 +82,9 @@ type mobileOptions struct {
 	// MemoryLimitMB is a soft limit for the Go heap; 0 means none.
 	MemoryLimitMB int        `json:"memoryLimitMb"`
 	LocalProxy    localProxy `json:"localProxy"`
+	// Relay chains the connection through a Russian server; the app sends it
+	// only while it is on and the phone is on Wi-Fi.
+	Relay *relayOptions `json:"relay,omitempty"`
 }
 
 func (options mobileOptions) geoURLs() (string, string) {
@@ -428,7 +433,7 @@ func Prepare(profileID string) error {
 	inputs := currentSessionInputs()
 	mobile.Unlock()
 
-	config, naive, err := buildSessionFunc(profileID, inputs)
+	config, naive, relay, err := buildSessionFunc(profileID, inputs)
 	if err != nil {
 		return err
 	}
@@ -439,6 +444,7 @@ func Prepare(profileID string) error {
 		return errors.New("VPN уже подключён")
 	}
 	mobile.prepared, mobile.naive, mobile.profileID = config, naive, profileID
+	mobile.preparedRelay = relay
 	return nil
 }
 
@@ -533,6 +539,7 @@ func startPrepared(tunFD int) error {
 		return err
 	}
 	mobile.instance, mobile.naive, mobile.tunFD = instance, naive, tunFD
+	setActiveRelay(mobile.preparedRelay)
 	activateDialer(instance)
 	startWatchdogLocked()
 	return nil
@@ -544,6 +551,7 @@ func Stop() error {
 	stopWatchdogLocked()
 	mobile.prepared = nil
 	mobile.profileID = ""
+	setActiveRelay("")
 	var closeErr error
 	if mobile.instance != nil {
 		instance := mobile.instance
